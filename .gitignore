@@ -1,0 +1,13 @@
+node_modules/
+.expo/
+dist/
+web-build/
+.env
+.env.local
+.env.production
+ios/
+android/
+.DS_Store
+Thumbs.db
+*.log
+buildx-backend/.env
