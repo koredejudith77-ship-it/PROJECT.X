@@ -7,49 +7,41 @@ import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { WebSocketServer } from 'ws';
 import http from 'http';
-import * as Sentry from '@sentry/node';
-import { nodeProfilingIntegration } from '@sentry/profiling-node';
-import { PostHog } from 'posthog-node';
 
 dotenv.config();
 
 // ============================================
-// SENTRY - Error Tracking
+// SENTRY - Error Tracking (Optional - Safe)
 // ============================================
+let Sentry;
+let nodeProfilingIntegration;
 if (process.env.SENTRY_DSN) {
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    integrations: [nodeProfilingIntegration()],
-    tracesSampleRate: 1.0,
-    profilesSampleRate: 1.0,
-    environment: process.env.NODE_ENV || 'production',
-  });
-}
-
-// ============================================
-// POSTHOG - Analytics
-// ============================================
-const posthog = process.env.POSTHOG_API_KEY
-  ? new PostHog(process.env.POSTHOG_API_KEY, {
-      host: process.env.POSTHOG_HOST || 'https://app.posthog.com',
-      flushAt: 20,
-      flushInterval: 10000,
-    })
-  : null;
-
-function captureEvent(eventName, userId, properties = {}) {
-  if (posthog && userId) {
-    posthog.capture({
-      distinctId: userId,
-      event: eventName,
-      properties: { timestamp: new Date().toISOString(), ...properties },
-    });
+  try {
+    const sentryModule = await import('@sentry/node');
+    Sentry = sentryModule.default || sentryModule;
+    const profiling = await import('@sentry/profiling-node');
+    nodeProfilingIntegration = profiling.nodeProfilingIntegration;
+  } catch (err) {
+    console.warn('⚠️ Sentry not installed, skipping...');
   }
 }
 
-function identifyUser(userId, traits = {}) {
-  if (posthog && userId) {
-    posthog.identify({ distinctId: userId, properties: traits });
+// ============================================
+// POSTHOG - Analytics (Optional - Safe)
+// ============================================
+let PostHog;
+let posthog = null;
+if (process.env.POSTHOG_API_KEY) {
+  try {
+    const posthogModule = await import('posthog-node');
+    PostHog = posthogModule.PostHog || posthogModule.default;
+    posthog = new PostHog(process.env.POSTHOG_API_KEY, {
+      host: process.env.POSTHOG_HOST || 'https://app.posthog.com',
+      flushAt: 20,
+      flushInterval: 10000,
+    });
+  } catch (err) {
+    console.warn('⚠️ PostHog not installed, skipping...');
   }
 }
 
@@ -68,14 +60,56 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Sentry request handler (must be first middleware)
-if (process.env.SENTRY_DSN) {
-  app.use(Sentry.Handlers.requestHandler());
-  app.use(Sentry.Handlers.tracingHandler());
+// ============================================
+// SENTRY INITIALIZATION
+// ============================================
+if (Sentry && process.env.SENTRY_DSN) {
+  try {
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      integrations: nodeProfilingIntegration ? [nodeProfilingIntegration()] : [],
+      tracesSampleRate: 1.0,
+      profilesSampleRate: 1.0,
+      environment: process.env.NODE_ENV || 'production',
+    });
+    
+    app.use(Sentry.Handlers.requestHandler());
+    app.use(Sentry.Handlers.tracingHandler());
+    console.log('✅ Sentry initialized');
+  } catch (err) {
+    console.warn('⚠️ Sentry init failed:', err.message);
+  }
 }
 
 app.use(express.json());
 app.use(cors({ origin: '*' }));
+
+// ============================================
+// POSTHOG HELPERS
+// ============================================
+function captureEvent(eventName, userId, properties = {}) {
+  if (posthog && userId) {
+    try {
+      posthog.capture({
+        distinctId: userId,
+        event: eventName,
+        properties: { timestamp: new Date().toISOString(), ...properties },
+      });
+    } catch (err) {
+      console.warn('PostHog capture failed:', err.message);
+    }
+  }
+}
+
+function identifyUser(userId, traits = {}) {
+  if (posthog && userId) {
+    try {
+      posthog.identify({ distinctId: userId, properties: traits });
+    } catch (err) {
+      console.warn('PostHog identify failed:', err.message);
+    }
+  }
+}
 
 // ============================================
 // WEBSOCKET (Voice/Audio)
@@ -1106,20 +1140,22 @@ app.get('/health', (req, res) => {
       voice_audio: true,
       escrow_release: true,
       cron_jobs: true,
-      sentry: !!process.env.SENTRY_DSN,
-      posthog: !!process.env.POSTHOG_API_KEY,
+      sentry: !!process.env.SENTRY_DSN && !!Sentry,
+      posthog: !!process.env.POSTHOG_API_KEY && !!posthog,
     },
   });
 });
 
 // ============================================
-// SENTRY ERROR HANDLER (must be before app.listen)
+// SENTRY ERROR HANDLER
 // ============================================
-if (process.env.SENTRY_DSN) {
+if (Sentry && process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
 }
 
-// Optional custom error handler
+// ============================================
+// CUSTOM ERROR HANDLER
+// ============================================
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
@@ -1140,8 +1176,8 @@ server.listen(PORT, () => {
   console.log(`  ✅ Syndicate RPC`);
   console.log(`  ✅ Escrow Release`);
   console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
-  if (process.env.SENTRY_DSN) console.log(`  ✅ Sentry Error Tracking`);
-  if (process.env.POSTHOG_API_KEY) console.log(`  ✅ PostHog Analytics`);
+  if (process.env.SENTRY_DSN && Sentry) console.log(`  ✅ Sentry Error Tracking`);
+  if (process.env.POSTHOG_API_KEY && posthog) console.log(`  ✅ PostHog Analytics`);
 });
 
 export default app;
