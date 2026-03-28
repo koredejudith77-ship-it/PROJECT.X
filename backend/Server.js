@@ -893,5 +893,19 @@ app.get('/health', (req, res) => {
 // ============================================
 // START SERVER
 // ============================================
+
+const PORT = process.env.PORT ?? 3000;
+server.listen(PORT, () => {
+  console.log(`\n👑 BUILD.X Backend (Complete) running on port ${PORT}\n`);
+  console.log(`Features enabled:`);
+  console.log(`  ✅ Stripe Payment Sheet`);
+  console.log(`  ✅ Apex/Legend Subscriptions (Monthly/Yearly)`);
+  console.log(`  ✅ WalletConnect Crypto Payments`);
+  console.log(`  ✅ Expo Push Notifications`);
+  console.log(`  ✅ Voice/Audio (WebSocket)`);
+  console.log(`  ✅ Syndicate RPC`);
+  console.log(`  ✅ Escrow Release`);
+  console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
 });
+
 export default app;
