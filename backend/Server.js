@@ -122,7 +122,7 @@ function generateCertNumber() {
   return `BX-${timestamp}-${random}`;
 }
 
-// Expo push notification helper (using Expo's push API)
+// Expo push notification helper
 async function sendExpoPushNotification(pushToken, title, body, data = {}) {
   if (!pushToken) return false;
   
@@ -184,12 +184,11 @@ async function sendEmail({ to, subject, html, text, from = process.env.EMAIL_FRO
 // CORE ROUTES
 // ============================================
 
-// ESCROW RELEASE - Sellers get paid
+// ESCROW RELEASE
 app.post('/escrow/release', requireAuth, async (req, res) => {
   try {
     const { transaction_id } = req.body;
     
-    // Only seller or admin can release
     const { data: transaction } = await supabase
       .from('transactions')
       .select('id, seller_id, escrow_status')
@@ -209,7 +208,6 @@ app.post('/escrow/release', requireAuth, async (req, res) => {
       .update({ escrow_status: 'released', released_at: new Date().toISOString() })
       .eq('id', transaction_id);
     
-    // Notify buyer
     const { data: buyer } = await supabase.from('transactions').select('buyer_id').eq('id', transaction_id).single();
     await sendPushNotification(buyer.buyer_id, 'Escrow Released', 'Your payment has been released to the seller.');
     
@@ -223,7 +221,6 @@ app.post('/escrow/release', requireAuth, async (req, res) => {
 // CRON: Close expired auctions
 app.post('/cron/close-auctions', async (req, res) => {
   try {
-    // Verify cron secret
     const cronSecret = req.headers['x-cron-secret'];
     if (cronSecret !== process.env.CRON_SECRET) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -299,7 +296,7 @@ app.post('/cron/payment-deadlines', async (req, res) => {
   }
 });
 
-// UPLOAD FILE (Direct upload with presigned URL)
+// UPLOAD FILE
 app.post('/upload/file', requireAuth, async (req, res) => {
   const { filename, content_type, listing_id, asset_type = 'asset' } = req.body;
   if (!filename || !content_type) return res.status(400).json({ error: 'filename and content_type required' });
@@ -369,6 +366,102 @@ app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('payment-sheet error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// SUBSCRIPTIONS (Apex & Legend - Monthly/Yearly)
+// ============================================
+
+app.post('/subscription/create', requireAuth, async (req, res) => {
+  try {
+    const { tier, duration = 'monthly', payment_method_id } = req.body;
+    
+    if (!tier || !['apex', 'legend'].includes(tier)) {
+      return res.status(400).json({ error: 'Valid tier required: apex or legend' });
+    }
+    
+    let priceId;
+    if (tier === 'apex') {
+      priceId = duration === 'monthly' 
+        ? process.env.APEX_MONTHLY_PRICE_ID 
+        : process.env.APEX_YEARLY_PRICE_ID;
+    } else {
+      priceId = duration === 'monthly' 
+        ? process.env.LEGEND_MONTHLY_PRICE_ID 
+        : process.env.LEGEND_YEARLY_PRICE_ID;
+    }
+    
+    if (!priceId) {
+      return res.status(400).json({ error: 'Price ID not configured' });
+    }
+    
+    const { data: user } = await supabase
+      .from('users')
+      .select('stripe_customer_id, email')
+      .eq('id', req.user.id)
+      .single();
+    
+    let customerId = user?.stripe_customer_id;
+    
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: { supabase_id: req.user.id },
+      });
+      customerId = customer.id;
+      await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', req.user.id);
+    }
+    
+    if (payment_method_id) {
+      await stripe.paymentMethods.attach(payment_method_id, { customer: customerId });
+      await stripe.customers.update(customerId, { 
+        invoice_settings: { default_payment_method: payment_method_id } 
+      });
+    }
+    
+    const subscription = await stripe.subscriptions.create({
+      customer: customerId,
+      items: [{ price: priceId }],
+      payment_behavior: 'default_incomplete',
+      expand: ['latest_invoice.payment_intent'],
+      metadata: { tier, duration, user_id: req.user.id },
+    });
+    
+    const vipTier = tier === 'apex' ? 'elite' : 'legend';
+    await supabase
+      .from('users')
+      .update({ 
+        vip_tier: vipTier, 
+        is_apex_vip: true,
+        subscription_tier: tier,
+        subscription_duration: duration,
+        subscription_id: subscription.id,
+      })
+      .eq('id', req.user.id);
+    
+    res.json({
+      subscription_id: subscription.id,
+      client_secret: subscription.latest_invoice?.payment_intent?.client_secret,
+      tier: vipTier,
+      duration,
+    });
+  } catch (err) {
+    console.error('subscription create error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/subscription/cancel', requireAuth, async (req, res) => {
+  try {
+    const { subscription_id } = req.body;
+    if (!subscription_id) return res.status(400).json({ error: 'subscription_id required' });
+    
+    const subscription = await stripe.subscriptions.update(subscription_id, { cancel_at_period_end: true });
+    res.json({ subscription_id: subscription.id, cancel_at_period_end: true });
+  } catch (err) {
+    console.error('subscription cancel error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -466,74 +559,8 @@ app.post('/webhook/crypto', express.json(), async (req, res) => {
 });
 
 // ============================================
-// APEX SUBSCRIPTIONS
+// STRIPE WEBHOOK
 // ============================================
-
-app.post('/subscription/create', requireAuth, async (req, res) => {
-  try {
-    const { price_id, payment_method_id } = req.body;
-    if (!price_id) return res.status(400).json({ error: 'price_id required' });
-    
-    const { data: user } = await supabase
-      .from('users')
-      .select('stripe_customer_id, email')
-      .eq('id', req.user.id)
-      .single();
-    
-    let customerId = user?.stripe_customer_id;
-    
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-        metadata: { supabase_id: req.user.id },
-      });
-      customerId = customer.id;
-      await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', req.user.id);
-    }
-    
-    if (payment_method_id) {
-      await stripe.paymentMethods.attach(payment_method_id, { customer: customerId });
-      await stripe.customers.update(customerId, { invoice_settings: { default_payment_method: payment_method_id } });
-    }
-    
-    const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: price_id }],
-      payment_behavior: 'default_incomplete',
-      expand: ['latest_invoice.payment_intent'],
-    });
-    
-    let vipTier = 'builder';
-    if (price_id === process.env.APEX_PRICE_ID) vipTier = 'elite';
-    if (price_id === process.env.LEGEND_PRICE_ID) vipTier = 'legend';
-    
-    await supabase
-      .from('users')
-      .update({ vip_tier: vipTier, is_apex_vip: vipTier === 'elite' || vipTier === 'legend' })
-      .eq('id', req.user.id);
-    
-    res.json({
-      subscription_id: subscription.id,
-      client_secret: subscription.latest_invoice?.payment_intent?.client_secret,
-    });
-  } catch (err) {
-    console.error('subscription create error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/subscription/cancel', requireAuth, async (req, res) => {
-  try {
-    const { subscription_id } = req.body;
-    if (!subscription_id) return res.status(400).json({ error: 'subscription_id required' });
-    
-    const subscription = await stripe.subscriptions.update(subscription_id, { cancel_at_period_end: true });
-    res.json({ subscription_id: subscription.id, cancel_at_period_end: true });
-  } catch (err) {
-    console.error('subscription cancel error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -550,9 +577,13 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
     const invoice = event.data.object;
     const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
     const priceId = subscription.items.data[0].price.id;
+    
     let vipTier = 'builder';
-    if (priceId === process.env.APEX_PRICE_ID) vipTier = 'elite';
-    if (priceId === process.env.LEGEND_PRICE_ID) vipTier = 'legend';
+    if (priceId === process.env.APEX_MONTHLY_PRICE_ID || priceId === process.env.APEX_YEARLY_PRICE_ID) {
+      vipTier = 'elite';
+    } else if (priceId === process.env.LEGEND_MONTHLY_PRICE_ID || priceId === process.env.LEGEND_YEARLY_PRICE_ID) {
+      vipTier = 'legend';
+    }
     
     await supabase
       .from('users')
@@ -848,9 +879,9 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     features: {
       stripe_payment_sheet: true,
+      subscriptions: { apex: true, legend: true, monthly: true, yearly: true },
       walletconnect_crypto: true,
       push_notifications: true,
-      apex_subscriptions: true,
       syndicate_rpc: true,
       voice_audio: true,
       escrow_release: true,
@@ -862,11 +893,5 @@ app.get('/health', (req, res) => {
 // ============================================
 // START SERVER
 // ============================================
-
-const PORT = process.env.PORT ?? 3000;
-server.listen(PORT, () => {
-  console.log(`\n👑 BUILD.X Backend running on port ${PORT}\n`);
 });
-
 export default app;
-
