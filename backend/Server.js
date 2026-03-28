@@ -1047,4 +1047,101 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
       certificate_id: cert.id,
       download_token: downloadToken,
     });
-  } catch (
+  } catch (err) {
+    console.error('confirm-payment error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// DOWNLOAD TOKEN
+// ============================================
+app.post('/download/generate-token', requireAuth, async (req, res) => {
+  try {
+    const { transaction_id } = req.body;
+    const { data: tx } = await supabase
+      .from('transactions')
+      .select('buyer_id, listing_id')
+      .eq('id', transaction_id)
+      .single();
+    if (!tx || tx.buyer_id !== req.user.id)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    const token = generateSecureToken();
+    const expiry = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('transactions')
+      .update({ download_token: token, download_token_expires_at: expiry })
+      .eq('id', transaction_id);
+
+    const { data: listing } = await supabase
+      .from('listings')
+      .select('file_path')
+      .eq('id', tx.listing_id)
+      .single();
+    const { data: signedUrl } = await supabase.storage
+      .from('assets')
+      .createSignedUrl(listing.file_path, 3600);
+
+    res.json({ download_url: signedUrl, token, expires_at: expiry });
+  } catch (err) {
+    console.error('generate-token error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// HEALTH CHECK
+// ============================================
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'BUILD.X backend live 🚀',
+    timestamp: new Date().toISOString(),
+    features: {
+      stripe_payment_sheet: true,
+      subscriptions: { apex: true, legend: true, monthly: true, yearly: true },
+      walletconnect_crypto: true,
+      push_notifications: true,
+      syndicate_rpc: true,
+      voice_audio: true,
+      escrow_release: true,
+      cron_jobs: true,
+      sentry: !!process.env.SENTRY_DSN,
+      posthog: !!process.env.POSTHOG_API_KEY,
+    },
+  });
+});
+
+// ============================================
+// SENTRY ERROR HANDLER (must be before app.listen)
+// ============================================
+if (process.env.SENTRY_DSN) {
+  app.use(Sentry.Handlers.errorHandler());
+}
+
+// Optional custom error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ============================================
+// START SERVER
+// ============================================
+const PORT = process.env.PORT ?? 3000;
+server.listen(PORT, () => {
+  console.log(`\n👑 BUILD.X Backend (Complete) running on port ${PORT}\n`);
+  console.log(`Features enabled:`);
+  console.log(`  ✅ Stripe Payment Sheet`);
+  console.log(`  ✅ Apex/Legend Subscriptions (Monthly/Yearly)`);
+  console.log(`  ✅ WalletConnect Crypto Payments`);
+  console.log(`  ✅ Expo Push Notifications`);
+  console.log(`  ✅ Voice/Audio (WebSocket)`);
+  console.log(`  ✅ Syndicate RPC`);
+  console.log(`  ✅ Escrow Release`);
+  console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
+  if (process.env.SENTRY_DSN) console.log(`  ✅ Sentry Error Tracking`);
+  if (process.env.POSTHOG_API_KEY) console.log(`  ✅ PostHog Analytics`);
+});
+
+export default app;
