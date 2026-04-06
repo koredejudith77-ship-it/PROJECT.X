@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';  // ADDED
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
@@ -52,6 +53,21 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// ============================================
+// SECURITY MIDDLEWARE (ADDED)
+// ============================================
+app.use(helmet());  // Security headers
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Restricted CORS (replace with your actual domain)
+app.use(cors({ 
+  origin: ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com', 'http://localhost:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -80,9 +96,6 @@ if (Sentry && process.env.SENTRY_DSN) {
     console.warn('⚠️ Sentry init failed:', err.message);
   }
 }
-
-app.use(express.json());
-app.use(cors({ origin: '*' }));
 
 // ============================================
 // POSTHOG HELPERS
@@ -673,7 +686,7 @@ app.post('/webhook/crypto', express.json(), async (req, res) => {
 });
 
 // ============================================
-// STRIPE WEBHOOK
+// STRIPE WEBHOOK (Already has signature verification ✅)
 // ============================================
 app.post(
   '/webhook/stripe',
