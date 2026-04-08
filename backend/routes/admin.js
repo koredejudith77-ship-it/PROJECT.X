@@ -1,6 +1,6 @@
 // routes/admin.js
 import express from 'express';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth } from '../middleware/adminAuth.js';
 import { requireAdmin, requirePermission } from '../middleware/adminAuth.js';
 import { AdminController } from '../controllers/AdminController.js';
 
