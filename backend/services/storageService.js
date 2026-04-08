@@ -10,7 +10,7 @@ export function generateFilePath(userId, filename, folder = 'assets') {
   return `${folder}/${userId}/${timestamp}-${random}-${cleanFilename}`;
 }
 
-// Upload file to Supabase Storage
+// Upload file buffer to Supabase Storage
 export async function uploadFile(fileBuffer, filePath, bucket = 'assets') {
   try {
     const { data, error } = await supabase.storage
@@ -29,7 +29,7 @@ export async function uploadFile(fileBuffer, filePath, bucket = 'assets') {
   }
 }
 
-// Upload file from Express multer
+// Upload multer file (Express) to Supabase Storage
 export async function uploadMulterFile(file, userId, folder = 'assets') {
   try {
     const filePath = generateFilePath(userId, file.originalname, folder);
@@ -40,7 +40,7 @@ export async function uploadMulterFile(file, userId, folder = 'assets') {
   }
 }
 
-// Get public URL
+// Get public URL for a file
 export function getPublicUrl(filePath, bucket = 'assets') {
   const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
   return data.publicUrl;
@@ -56,12 +56,12 @@ export async function getSignedUrl(filePath, bucket = 'assets', expiresIn = 3600
     if (error) throw error;
     return { success: true, url: data.signedUrl };
   } catch (error) {
-    console.error('Signed URL error:', error);
+    console.error('Get signed URL error:', error);
     return { success: false, error: error.message };
   }
 }
 
-// Delete file
+// Delete file from storage
 export async function deleteFile(filePath, bucket = 'assets') {
   try {
     const { error } = await supabase.storage.from(bucket).remove([filePath]);
@@ -73,27 +73,51 @@ export async function deleteFile(filePath, bucket = 'assets') {
   }
 }
 
+// List files in a folder
+export async function listFiles(folderPath, bucket = 'assets') {
+  try {
+    const { data, error } = await supabase.storage.from(bucket).list(folderPath);
+    if (error) throw error;
+    return { success: true, files: data };
+  } catch (error) {
+    console.error('List files error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // Check if file exists
 export async function fileExists(filePath, bucket = 'assets') {
   try {
-    const { data, error } = await supabase.storage.from(bucket).list(filePath.split('/').slice(0, -1).join('/'));
-    if (error) throw error;
+    const folderPath = filePath.split('/').slice(0, -1).join('/');
     const fileName = filePath.split('/').pop();
+    const { data, error } = await supabase.storage.from(bucket).list(folderPath);
+    if (error) throw error;
     return data?.some(file => file.name === fileName) || false;
   } catch (error) {
     return false;
   }
 }
 
-// Get file info
-export async function getFileInfo(filePath, bucket = 'assets') {
+// Move file between folders
+export async function moveFile(fromPath, toPath, bucket = 'assets') {
   try {
-    const { data, error } = await supabase.storage.from(bucket).list(filePath.split('/').slice(0, -1).join('/'));
+    const { data, error } = await supabase.storage.from(bucket).move(fromPath, toPath);
     if (error) throw error;
-    const fileName = filePath.split('/').pop();
-    const file = data?.find(f => f.name === fileName);
-    return file || null;
+    return { success: true };
   } catch (error) {
-    return null;
+    console.error('Move file error:', error);
+    return { success: false, error: error.message };
   }
-      } 
+}
+
+// Copy file
+export async function copyFile(fromPath, toPath, bucket = 'assets') {
+  try {
+    const { data, error } = await supabase.storage.from(bucket).copy(fromPath, toPath);
+    if (error) throw error;
+    return { success: true };
+  } catch (error) {
+    console.error('Copy file error:', error);
+    return { success: false, error: error.message };
+  }
+  } 
