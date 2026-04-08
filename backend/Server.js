@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import helmet from 'helmet';  // ADDED
+import helmet from 'helmet';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
@@ -8,6 +8,14 @@ import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { WebSocketServer } from 'ws';
 import http from 'http';
+import cron from 'node-cron';
+
+// ============================================
+// IMPORT NEW ROUTES
+// ============================================
+import adminRoutes from './routes/admin.js';
+import forgeRoutes from './routes/forge.js';
+import { runAllCleanups } from './jobs/cleanupTempFiles.js';
 
 dotenv.config();
 
@@ -54,13 +62,13 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // ============================================
-// SECURITY MIDDLEWARE (ADDED)
+// SECURITY MIDDLEWARE
 // ============================================
-app.use(helmet());  // Security headers
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(helmet());
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
-// Restricted CORS (replace with your actual domain)
+// Restricted CORS
 app.use(cors({ 
   origin: ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com', 'http://localhost:3000'],
   credentials: true,
@@ -425,6 +433,16 @@ app.post('/upload/file', requireAuth, async (req, res) => {
 });
 
 // ============================================
+// ADMIN ROUTES
+// ============================================
+app.use('/api/admin', adminRoutes);
+
+// ============================================
+// FORGE ROUTES (X.FORGE)
+// ============================================
+app.use('/api/forge', forgeRoutes);
+
+// ============================================
 // STRIPE PAYMENT SHEET
 // ============================================
 app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
@@ -686,7 +704,7 @@ app.post('/webhook/crypto', express.json(), async (req, res) => {
 });
 
 // ============================================
-// STRIPE WEBHOOK (Already has signature verification ✅)
+// STRIPE WEBHOOK
 // ============================================
 app.post(
   '/webhook/stripe',
@@ -1153,10 +1171,24 @@ app.get('/health', (req, res) => {
       voice_audio: true,
       escrow_release: true,
       cron_jobs: true,
+      admin_routes: true,
+      forge_routes: true,
       sentry: !!process.env.SENTRY_DSN && !!Sentry,
       posthog: !!process.env.POSTHOG_API_KEY && !!posthog,
     },
   });
+});
+
+// ============================================
+// CLEANUP JOBS (Run daily at 2 AM)
+// ============================================
+// Run once at startup
+runAllCleanups();
+
+// Schedule daily cleanup at 2 AM
+cron.schedule('0 2 * * *', () => {
+  console.log('🕐 Running scheduled cleanup jobs...');
+  runAllCleanups();
 });
 
 // ============================================
@@ -1189,8 +1221,11 @@ server.listen(PORT, () => {
   console.log(`  ✅ Syndicate RPC`);
   console.log(`  ✅ Escrow Release`);
   console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
+  console.log(`  ✅ Admin Routes`);
+  console.log(`  ✅ X.FORGE Routes`);
+  console.log(`  ✅ Cleanup Jobs (Daily at 2 AM)`);
   if (process.env.SENTRY_DSN && Sentry) console.log(`  ✅ Sentry Error Tracking`);
   if (process.env.POSTHOG_API_KEY && posthog) console.log(`  ✅ PostHog Analytics`);
 });
 
-export default app;
+export default app; 
