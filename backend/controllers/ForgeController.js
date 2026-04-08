@@ -1,6 +1,6 @@
 // controllers/ForgeController.js
 import { ForgeAssetModel } from '../models/ForgeAssetModel.js';
-import { storageService } from '../services/storageService.js';
+import { uploadMulterFile, getSignedUrl, deleteFile } from '../services/storageService.js';
 import { generateHash, generateFileHash, compareHashes, getShortHash, verifyFileIntegrity } from '../services/hashService.js'; 
 import { validateFile, detectFileCategory } from '../middleware/validateFile.js';
 
