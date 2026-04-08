@@ -14,7 +14,6 @@ import cron from 'node-cron';
 // IMPORT NEW ROUTES
 // ============================================
 import adminRoutes from './routes/admin.js';
-import forgeRoutes from './routes/forge.js';
 import { runAllCleanups } from './jobs/cleanupTempFiles.js';
 
 dotenv.config();
@@ -437,10 +436,7 @@ app.post('/upload/file', requireAuth, async (req, res) => {
 // ============================================
 app.use('/api/admin', adminRoutes);
 
-// ============================================
-// FORGE ROUTES (X.FORGE)
-// ============================================
-app.use('/api/forge', forgeRoutes);
+// ===========================================
 
 // ============================================
 // STRIPE PAYMENT SHEET
