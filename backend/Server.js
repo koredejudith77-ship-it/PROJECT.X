@@ -10,6 +10,11 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
+import morgan from 'morgan';
+import compression from 'compression';
+import rateLimit from 'express-rate-limit';
+import { body, validationResult } from 'express-validator';
+import csrf from 'csurf';
 
 dotenv.config();
 
@@ -26,13 +31,20 @@ const wss = new WebSocketServer({ server });
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
-    integrations: [nodeProfilingIntegration()],
+    integrations: [
+      Sentry.httpIntegration(),
+      Sentry.expressIntegration(),
+      nodeProfilingIntegration(),
+    ],
     tracesSampleRate: 1.0,
     profilesSampleRate: 1.0,
     environment: process.env.NODE_ENV || 'production',
   });
+  
+  // Request handler must be the first middleware
   app.use(Sentry.Handlers.requestHandler());
   app.use(Sentry.Handlers.tracingHandler());
+  
   console.log('✅ Sentry configured');
 }
 
@@ -55,20 +67,85 @@ if (process.env.POSTHOG_API_KEY) {
 }
 
 // ============================================
+// VALIDATION HELPER
+// ============================================
+const validate = (validations) => {
+  return async (req, res, next) => {
+    await Promise.all(validations.map(validation => validation.run(req)));
+    const errors = validationResult(req);
+    if (errors.isEmpty()) return next();
+    res.status(400).json({ errors: errors.array() });
+  };
+};
+
+// ============================================
 // SECURITY MIDDLEWARE
 // ============================================
 app.use(helmet());
+app.use(compression());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
+// Request logging
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+
+// CSRF Protection
+const csrfProtection = csrf({ cookie: true });
+
+// CORS Configuration
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? [
+      'https://buildx.com',
+      'https://www.buildx.com',
+      'https://app.buildx.com',
+      'https://api.buildx.com',
+      /\.buildx\.com$/,
+    ]
+  : ['http://localhost:3000', 'http://localhost:8081', 'http://localhost:19006'];
+
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com']
-    : ['http://localhost:3000', 'http://localhost:8081'],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (process.env.NODE_ENV !== 'production') {
+      return callback(null, true);
+    }
+    const isAllowed = allowedOrigins.some(allowedOrigin => {
+      if (allowedOrigin instanceof RegExp) {
+        return allowedOrigin.test(origin);
+      }
+      return allowedOrigin === origin;
+    });
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-CSRF-Token', 'X-Cron-Secret'],
+  exposedHeaders: ['X-CSRF-Token'],
 }));
+
+// ============================================
+// RATE LIMITING
+// ============================================
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  message: 'Too many requests, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  skipSuccessfulRequests: true,
+});
+
+app.use('/api/', globalLimiter);
+app.use('/auth/', authLimiter);
 
 // ============================================
 // CLIENTS
@@ -150,7 +227,29 @@ async function requireAuth(req, res, next) {
 }
 
 // ============================================
-// RATE LIMITING
+// API KEY AUTH MIDDLEWARE
+// ============================================
+function requireApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey || apiKey !== process.env.API_KEY) {
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
+  next();
+}
+
+// ============================================
+// CRON AUTH MIDDLEWARE
+// ============================================
+function requireCronSecret(req, res, next) {
+  const secret = req.headers['x-cron-secret'];
+  if (!secret || secret !== process.env.CRON_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+// ============================================
+// BID RATE LIMITING
 // ============================================
 const bidRateMap = new Map();
 
@@ -232,6 +331,13 @@ async function sendEmail({ to, subject, html, text, from = process.env.EMAIL_FRO
 }
 
 // ============================================
+// CSRF TOKEN ENDPOINT
+// ============================================
+app.get('/api/csrf-token', csrfProtection, (req, res) => {
+  res.json({ csrfToken: req.csrfToken() });
+});
+
+// ============================================
 // SOCIAL LOGIN (Google, Apple, GitHub)
 // ============================================
 app.post('/auth/social/:provider', async (req, res) => {
@@ -259,7 +365,7 @@ app.get('/auth/callback', async (req, res) => {
 // ============================================
 // 2FA (Two-Factor Authentication)
 // ============================================
-app.post('/auth/2fa/enable', requireAuth, async (req, res) => {
+app.post('/auth/2fa/enable', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { data: factor, error } = await supabase.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Authenticator App' });
     if (error) throw error;
@@ -270,7 +376,7 @@ app.post('/auth/2fa/enable', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/auth/2fa/verify', requireAuth, async (req, res) => {
+app.post('/auth/2fa/verify', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { factor_id, code } = req.body;
     const { error } = await supabase.auth.mfa.verify({ factorId: factor_id, code });
@@ -299,7 +405,7 @@ app.post('/auth/login/2fa', async (req, res) => {
   }
 });
 
-app.post('/auth/2fa/disable', requireAuth, async (req, res) => {
+app.post('/auth/2fa/disable', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { factor_id } = req.body;
     await supabase.auth.mfa.unenroll({ factorId: factor_id });
@@ -324,7 +430,9 @@ app.get('/auth/2fa/status', requireAuth, async (req, res) => {
 // ============================================
 app.get('/api/admin/stats', requireAuth, async (req, res) => {
   try {
-    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+    const { data: userData } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
+    if (!userData?.is_admin) return res.status(403).json({ error: 'Admin only' });
+    
     const [users, listings, transactions] = await Promise.all([
       supabase.from('users').select('*', { count: 'exact', head: true }),
       supabase.from('listings').select('*', { count: 'exact', head: true }),
@@ -338,7 +446,9 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
 
 app.get('/api/admin/users', requireAuth, async (req, res) => {
   try {
-    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+    const { data: userData } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
+    if (!userData?.is_admin) return res.status(403).json({ error: 'Admin only' });
+    
     const { data, error } = await supabase.from('users').select('id, username, email, is_banned, vip_tier, created_at').order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ users: data });
@@ -349,7 +459,9 @@ app.get('/api/admin/users', requireAuth, async (req, res) => {
 
 app.post('/api/admin/users/:userId/ban', requireAuth, async (req, res) => {
   try {
-    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+    const { data: userData } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
+    if (!userData?.is_admin) return res.status(403).json({ error: 'Admin only' });
+    
     await supabase.from('users').update({ is_banned: true, banned_at: new Date().toISOString() }).eq('id', req.params.userId);
     res.json({ success: true });
   } catch (err) {
@@ -359,7 +471,9 @@ app.post('/api/admin/users/:userId/ban', requireAuth, async (req, res) => {
 
 app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
   try {
-    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+    const { data: userData } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
+    if (!userData?.is_admin) return res.status(403).json({ error: 'Admin only' });
+    
     await supabase.from('users').update({ is_banned: false, banned_at: null }).eq('id', req.params.userId);
     res.json({ success: true });
   } catch (err) {
@@ -370,14 +484,12 @@ app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
 // ============================================
 // CRON ROUTES
 // ============================================
-app.post('/cron/close-auctions', async (req, res) => {
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+app.post('/cron/close-auctions', requireCronSecret, async (req, res) => {
   const { data } = await supabase.from('listings').update({ status: 'ended' }).eq('status', 'live').lt('ends_at', new Date().toISOString()).select();
   res.json({ closed: data?.length || 0 });
 });
 
-app.post('/cron/dutch-price-drop', async (req, res) => {
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+app.post('/cron/dutch-price-drop', requireCronSecret, async (req, res) => {
   const { data: dutchAuctions } = await supabase.from('listings').select('id, current_bid, starting_bid, auction_data').eq('auction_type', 'dutch').eq('status', 'live');
   let dropped = 0;
   for (const auction of dutchAuctions || []) {
@@ -391,8 +503,7 @@ app.post('/cron/dutch-price-drop', async (req, res) => {
   res.json({ dropped });
 });
 
-app.post('/cron/payment-deadlines', async (req, res) => {
-  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+app.post('/cron/payment-deadlines', requireCronSecret, async (req, res) => {
   const expired = await supabase.from('listings').update({ status: 'ended', winner_id: null }).eq('status', 'sold').lt('payment_deadline', new Date().toISOString());
   res.json({ expired: expired.data?.length || 0 });
 });
@@ -400,7 +511,7 @@ app.post('/cron/payment-deadlines', async (req, res) => {
 // ============================================
 // UPLOAD ROUTE
 // ============================================
-app.post('/upload/file', requireAuth, async (req, res) => {
+app.post('/upload/file', requireAuth, csrfProtection, async (req, res) => {
   const { filename, content_type, listing_id, asset_type = 'asset' } = req.body;
   if (!filename || !content_type) return res.status(400).json({ error: 'filename and content_type required' });
 
@@ -422,9 +533,53 @@ app.post('/upload/file', requireAuth, async (req, res) => {
 });
 
 // ============================================
+// PAYMENT METHODS
+// ============================================
+app.get('/payment/methods', requireAuth, async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('stripe_customer_id').eq('id', req.user.id).single();
+    if (!user?.stripe_customer_id) return res.json({ methods: [] });
+    
+    const methods = await stripe.paymentMethods.list({
+      customer: user.stripe_customer_id,
+      type: 'card',
+    });
+    
+    res.json({ methods: methods.data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/payment/method/:id', requireAuth, csrfProtection, async (req, res) => {
+  try {
+    await stripe.paymentMethods.detach(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// TRANSACTIONS
+// ============================================
+app.get('/transactions', requireAuth, async (req, res) => {
+  try {
+    const { data } = await supabase.from('transactions')
+      .select('*, listing:listings(*)')
+      .or(`buyer_id.eq.${req.user.id},seller_id.eq.${req.user.id}`)
+      .order('created_at', { ascending: false });
+    
+    res.json({ transactions: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
 // STRIPE PAYMENT SHEET
 // ============================================
-app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
+app.post('/payment/payment-sheet', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { amount, currency = 'usd', listing_id } = req.body;
     if (!amount) return res.status(400).json({ error: 'Amount required' });
@@ -452,7 +607,7 @@ app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
 // ============================================
 // SUBSCRIPTIONS
 // ============================================
-app.post('/subscription/create', requireAuth, async (req, res) => {
+app.post('/subscription/create', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { tier, duration = 'monthly', payment_method_id } = req.body;
     if (!tier || !['apex', 'legend'].includes(tier)) return res.status(400).json({ error: 'Valid tier required: apex or legend' });
@@ -493,7 +648,7 @@ app.post('/subscription/create', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/subscription/cancel', requireAuth, async (req, res) => {
+app.post('/subscription/cancel', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { subscription_id } = req.body;
     if (!subscription_id) return res.status(400).json({ error: 'subscription_id required' });
@@ -507,7 +662,7 @@ app.post('/subscription/cancel', requireAuth, async (req, res) => {
 // ============================================
 // CRYPTO PAYMENTS
 // ============================================
-app.post('/payment/crypto', requireAuth, async (req, res) => {
+app.post('/payment/crypto', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { listing_id, amount, currency = 'ETH', wallet_address } = req.body;
     if (!listing_id || !amount || !wallet_address) return res.status(400).json({ error: 'Missing required fields' });
@@ -585,7 +740,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
 // ============================================
 // PUSH NOTIFICATIONS
 // ============================================
-app.post('/notifications/register-token', requireAuth, async (req, res) => {
+app.post('/notifications/register-token', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { push_token } = req.body;
     if (!push_token) return res.status(400).json({ error: 'push_token required' });
@@ -599,7 +754,7 @@ app.post('/notifications/register-token', requireAuth, async (req, res) => {
 // ============================================
 // BID PLACEMENT
 // ============================================
-app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
+app.post('/bid/place', requireAuth, csrfProtection, bidRateLimit, async (req, res) => {
   try {
     const { listing_id, amount, currency = 'USD', is_ghost = false } = req.body;
     if (!listing_id || !amount) return res.status(400).json({ error: 'listing_id and amount required' });
@@ -635,7 +790,7 @@ app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
 // ============================================
 // PAYMENT INTENT
 // ============================================
-app.post('/payment/create-intent', requireAuth, async (req, res) => {
+app.post('/payment/create-intent', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { listing_id, amount_cents, currency, seller_stripe_account } = req.body;
     const { data: listing, error: listingError } = await supabase.from('listings').select('id, status, current_bidder_id, seller_id').eq('id', listing_id).single();
@@ -662,7 +817,7 @@ app.post('/payment/create-intent', requireAuth, async (req, res) => {
 // ============================================
 // PAYMENT CONFIRM
 // ============================================
-app.post('/payment/confirm', requireAuth, async (req, res) => {
+app.post('/payment/confirm', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { payment_intent_id, listing_id } = req.body;
     const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
@@ -718,7 +873,7 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
 // ============================================
 // DOWNLOAD TOKEN
 // ============================================
-app.post('/download/generate-token', requireAuth, async (req, res) => {
+app.post('/download/generate-token', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { transaction_id } = req.body;
     const { data: tx } = await supabase.from('transactions').select('buyer_id, listing_id').eq('id', transaction_id).single();
@@ -735,10 +890,11 @@ app.post('/download/generate-token', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // ============================================
 // SYNDICATE JOIN
 // ============================================
-app.post('/syndicate/join', requireAuth, async (req, res) => {
+app.post('/syndicate/join', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { syndicate_id, amount, currency = 'USD' } = req.body;
     if (!syndicate_id || !amount) return res.status(400).json({ error: 'syndicate_id and amount required' });
@@ -779,36 +935,65 @@ app.get('/voice/room/:listingId', requireAuth, async (req, res) => {
 // ============================================
 // ESCROW RELEASE
 // ============================================
-app.post('/escrow/release', requireAuth, async (req, res) => {
+app.post('/escrow/release', requireAuth, csrfProtection, async (req, res) => {
   try {
     const { transaction_id } = req.body;
-    const { data: transaction } = await supabase.from('transactions').select('id, seller_id, escrow_status').eq('id', transaction_id).single();
+    const { data: transaction } = await supabase.from('transactions').select('id, seller_id, buyer_id, escrow_status').eq('id', transaction_id).single();
     if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
-    if (transaction.seller_id !== req.user.id && !req.user.is_admin) return res.status(403).json({ error: 'Only seller can release escrow' });
+    
+    const { data: userData } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
+    if (transaction.seller_id !== req.user.id && !userData?.is_admin) {
+      return res.status(403).json({ error: 'Only seller or admin can release escrow' });
+    }
     if (transaction.escrow_status !== 'holding') return res.status(400).json({ error: 'Escrow not in holding state' });
 
     await supabase.from('transactions').update({ escrow_status: 'released', released_at: new Date().toISOString() }).eq('id', transaction_id);
-    const { data: buyer } = await supabase.from('transactions').select('buyer_id').eq('id', transaction_id).single();
-    await sendPushNotification(buyer.buyer_id, 'Escrow Released', 'Your payment has been released to the seller.');
+    await sendPushNotification(transaction.buyer_id, 'Escrow Released', 'Your payment has been released to the seller.');
     res.json({ success: true, message: 'Escrow released' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-
 // ============================================
 // HEALTH CHECK
 // ============================================
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  let dbStatus = 'unknown';
+  let stripeStatus = 'unknown';
+  
+  try {
+    const { data } = await supabase.from('users').select('id', { count: 'exact', head: true });
+    dbStatus = data !== null ? 'connected' : 'disconnected';
+  } catch {
+    dbStatus = 'disconnected';
+  }
+  
+  try {
+    await stripe.customers.list({ limit: 1 });
+    stripeStatus = 'connected';
+  } catch {
+    stripeStatus = 'disconnected';
+  }
+  
   res.json({
     status: 'BUILD.X backend live 🚀',
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    database: dbStatus,
+    stripe: stripeStatus,
     features: {
-      stripe_payment_sheet: true, subscriptions: true, walletconnect_crypto: true,
-      push_notifications: true, syndicate_rpc: true, voice_audio: true,
-      escrow_release: true, cron_jobs: true, admin_routes: true,
-      social_login: true, two_factor_auth: true,
+      stripe_payment_sheet: true,
+      subscriptions: true,
+      walletconnect_crypto: true,
+      push_notifications: true,
+      syndicate_rpc: true,
+      voice_audio: true,
+      escrow_release: true,
+      cron_jobs: true,
+      admin_routes: true,
+      social_login: true,
+      two_factor_auth: true,
     },
   });
 });
@@ -825,15 +1010,30 @@ if (process.env.SENTRY_DSN) {
 // ============================================
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  
+  if (err.code === 'EBADCSRFTOKEN') {
+    return res.status(403).json({ error: 'Invalid CSRF token' });
+  }
+  
+  res.status(500).json({ 
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message 
+  });
+});
+
+// ============================================
+// 404 HANDLER
+// ============================================
+app.use((req, res) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
 // ============================================
 // START SERVER
 // ============================================
 const PORT = process.env.PORT ?? 3000;
-server.listen(PORT, () => {
+const httpServer = server.listen(PORT, () => {
   console.log(`\n👑 BUILD.X Backend running on port ${PORT}\n`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Features enabled:`);
   console.log(`  ✅ Stripe Payment Sheet`);
   console.log(`  ✅ Apex/Legend Subscriptions`);
@@ -846,6 +1046,50 @@ server.listen(PORT, () => {
   console.log(`  ✅ Admin Routes`);
   console.log(`  ✅ Social Login (Google/Apple/GitHub)`);
   console.log(`  ✅ Two-Factor Authentication (2FA)`);
+  console.log(`  ✅ CSRF Protection`);
+  console.log(`  ✅ Rate Limiting`);
+  console.log(`  ✅ Request Logging`);
+  console.log(`  ✅ Compression`);
+});
+
+// ============================================
+// GRACEFUL SHUTDOWN
+// ============================================
+const shutdown = async (signal) => {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  
+  httpServer.close(() => {
+    console.log('HTTP server closed');
+  });
+  
+  // Close WebSocket connections
+  wss.clients.forEach(client => client.close());
+  console.log('WebSocket connections closed');
+  
+  // Flush PostHog
+  if (posthog) {
+    await posthog.shutdown();
+    console.log('PostHog flushed');
+  }
+  
+  // Close Sentry
+  if (process.env.SENTRY_DSN) {
+    await Sentry.close(2000);
+    console.log('Sentry closed');
+  }
+  
+  console.log('Shutdown complete');
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  shutdown('UNCAUGHT_EXCEPTION');
 });
 
 export default app;
