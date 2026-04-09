@@ -10,24 +10,26 @@ import { WebSocketServer } from 'ws';
 import http from 'http';
 
 dotenv.config();
+// ============================================
+// SENTRY - Error Tracking (FIXED)
+// ============================================
+import * as Sentry from '@sentry/node';
+import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
-// ============================================
-// SENTRY - Error Tracking (Optional)
-// ============================================
-let Sentry;
-let nodeProfilingIntegration;
 if (process.env.SENTRY_DSN) {
-  try {
-    const sentryModule = await import('@sentry/node');
-    Sentry = sentryModule.default || sentryModule;
-    const profiling = await import('@sentry/profiling-node');
-    nodeProfilingIntegration = profiling.nodeProfilingIntegration;
-  } catch (err) {
-    console.warn('⚠️ Sentry not installed, skipping...');
-  }
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    integrations: [nodeProfilingIntegration()],
+    tracesSampleRate: 1.0,
+    profilesSampleRate: 1.0,
+    environment: process.env.NODE_ENV || 'production',
+  });
+  
+  app.use(Sentry.Handlers.requestHandler());
+  app.use(Sentry.Handlers.tracingHandler());
+  console.log('✅ Sentry initialized');
 }
-
-// ============================================
+=================================
 // POSTHOG - Analytics (Optional)
 // ============================================
 let PostHog;
@@ -1219,10 +1221,10 @@ app.get('/health', (req, res) => {
 // ============================================
 // SENTRY ERROR HANDLER
 // ============================================
-if (Sentry && process.env.SENTRY_DSN && Sentry.Handlers) {
+// Sentry error handler
+if (process.env.SENTRY_DSN) {
   app.use(Sentry.Handlers.errorHandler());
 }
-
 // ============================================
 // CUSTOM ERROR HANDLER
 // ============================================
