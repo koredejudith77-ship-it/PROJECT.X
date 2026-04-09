@@ -151,6 +151,171 @@ async function requireAuth(req, res, next) {
   req.user = user;
   next();
 }
+// ============================================
+// SOCIAL LOGIN (Google, Apple, GitHub)
+// ============================================
+
+// Initiate OAuth login
+app.post('/auth/social/:provider', async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const allowed = ['google', 'apple', 'github'];
+    
+    if (!allowed.includes(provider)) {
+      return res.status(400).json({ error: 'Invalid provider' });
+    }
+    
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo: `${process.env.FRONTEND_URL}/auth/callback`,
+      },
+    });
+    
+    if (error) throw error;
+    res.json({ url: data.url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// OAuth callback (frontend handles this)
+app.get('/auth/callback', async (req, res) => {
+  // Frontend handles the callback from Supabase
+  // This endpoint just confirms the session
+  const { data: { session } } = await supabase.auth.getSession();
+  res.json({ session });
+});
+
+// ============================================
+// 2FA (Two-Factor Authentication)
+// ============================================
+
+// Enable 2FA for user
+app.post('/auth/2fa/enable', requireAuth, async (req, res) => {
+  try {
+    // Generate TOTP secret
+    const { data: factor, error } = await supabase.auth.mfa.enroll({
+      factorType: 'totp',
+      friendlyName: 'Authenticator App',
+    });
+    
+    if (error) throw error;
+    
+    // Store factor ID for later verification
+    await supabase
+      .from('users')
+      .update({ mfa_factor_id: factor.id })
+      .eq('id', req.user.id);
+    
+    res.json({
+      secret: factor.totp.secret,
+      qr_code: factor.totp.qr_code,
+      factor_id: factor.id,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify and activate 2FA
+app.post('/auth/2fa/verify', requireAuth, async (req, res) => {
+  try {
+    const { factor_id, code } = req.body;
+    
+    // Verify the TOTP code
+    const { data, error } = await supabase.auth.mfa.verify({
+      factorId: factor_id,
+      code,
+    });
+    
+    if (error) throw error;
+    
+    // Mark 2FA as enabled for user
+    await supabase
+      .from('users')
+      .update({ mfa_enabled: true })
+      .eq('id', req.user.id);
+    
+    res.json({ success: true, message: '2FA enabled successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Login with 2FA (after email/password)
+app.post('/auth/login/2fa', async (req, res) => {
+  try {
+    const { email, password, code } = req.body;
+    
+    // First, sign in with email/password
+    const { data: signIn, error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    
+    if (signInError) throw signInError;
+    
+    // Check if user has 2FA enabled
+    const { data: user } = await supabase
+      .from('users')
+      .select('mfa_enabled, mfa_factor_id')
+      .eq('id', signIn.user.id)
+      .single();
+    
+    if (!user?.mfa_enabled) {
+      // No 2FA, just return session
+      return res.json({ session: signIn.session, requires_2fa: false });
+    }
+    
+    // Verify 2FA code
+    const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
+      factorId: user.mfa_factor_id,
+      code,
+      challengeId: signIn.session?.access_token,
+    });
+    
+    if (verifyError) throw verifyError;
+    
+    res.json({ session: verifyData, requires_2fa: true, verified: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Disable 2FA
+app.post('/auth/2fa/disable', requireAuth, async (req, res) => {
+  try {
+    const { factor_id } = req.body;
+    
+    const { error } = await supabase.auth.mfa.unenroll({ factorId: factor_id });
+    if (error) throw error;
+    
+    await supabase
+      .from('users')
+      .update({ mfa_enabled: false, mfa_factor_id: null })
+      .eq('id', req.user.id);
+    
+    res.json({ success: true, message: '2FA disabled' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get 2FA status
+app.get('/auth/2fa/status', requireAuth, async (req, res) => {
+  try {
+    const { data: user } = await supabase
+      .from('users')
+      .select('mfa_enabled, mfa_factor_id')
+      .eq('id', req.user.id)
+      .single();
+    
+    res.json({ enabled: user?.mfa_enabled || false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================
 // RATE LIMITING
