@@ -14,7 +14,7 @@ import { nodeProfilingIntegration } from '@sentry/profiling-node';
 dotenv.config();
 
 // ============================================
-// SENTRY INITIALIZATION
+// SENTRY INITIALIZATION & MIDDLEWARE
 // ============================================
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -24,9 +24,11 @@ if (process.env.SENTRY_DSN) {
     profilesSampleRate: 1.0,
     environment: process.env.NODE_ENV || 'production',
   });
-  console.log('✅ Sentry configured');
+  
+  app.use(Sentry.Handlers.requestHandler());
+  app.use(Sentry.Handlers.tracingHandler());
+  console.log('✅ Sentry configured and enabled');
 }
-
 // ============================================
 // POSTHOG - Analytics (Optional)
 // ============================================
