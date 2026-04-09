@@ -8,18 +8,11 @@ import dotenv from 'dotenv';
 import { Resend } from 'resend';
 import { WebSocketServer } from 'ws';
 import http from 'http';
-import cron from 'node-cron';
-
-// ============================================
-// IMPORT NEW ROUTES
-// ============================================
-import adminRoutes from './routes/admin.js';
-// import { runAllCleanups } from './jobs/cleanupTempFiles.js';  // COMMENTED OUT
 
 dotenv.config();
 
 // ============================================
-// SENTRY - Error Tracking (Optional - Safe)
+// SENTRY - Error Tracking (Optional)
 // ============================================
 let Sentry;
 let nodeProfilingIntegration;
@@ -35,7 +28,7 @@ if (process.env.SENTRY_DSN) {
 }
 
 // ============================================
-// POSTHOG - Analytics (Optional - Safe)
+// POSTHOG - Analytics (Optional)
 // ============================================
 let PostHog;
 let posthog = null;
@@ -67,7 +60,6 @@ app.use(helmet());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
-// Restricted CORS
 app.use(cors({ 
   origin: ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com', 'http://localhost:3000'],
   credentials: true,
@@ -154,14 +146,12 @@ wss.on('connection', (ws, req) => {
     const message = JSON.parse(data);
     for (const [otherUserId, client] of room.entries()) {
       if (otherUserId !== userId && client.readyState === 1) {
-        client.send(
-          JSON.stringify({
-            type: message.type,
-            userId,
-            data: message.data,
-            timestamp: Date.now(),
-          })
-        );
+        client.send(JSON.stringify({
+          type: message.type,
+          userId,
+          data: message.data,
+          timestamp: Date.now(),
+        }));
       }
     }
   });
@@ -173,7 +163,7 @@ wss.on('connection', (ws, req) => {
 });
 
 // ============================================
-// MIDDLEWARE
+// AUTH MIDDLEWARE
 // ============================================
 async function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -186,6 +176,9 @@ async function requireAuth(req, res, next) {
   next();
 }
 
+// ============================================
+// RATE LIMITING
+// ============================================
 const bidRateMap = new Map();
 
 function bidRateLimit(req, res, next) {
@@ -281,6 +274,8 @@ async function sendEmail({ to, subject, html, text, from = process.env.EMAIL_FRO
 // ============================================
 // CORE ROUTES
 // ============================================
+
+// Escrow release
 app.post('/escrow/release', requireAuth, async (req, res) => {
   try {
     const { transaction_id } = req.body;
@@ -322,6 +317,7 @@ app.post('/escrow/release', requireAuth, async (req, res) => {
   }
 });
 
+// Cron: Close auctions
 app.post('/cron/close-auctions', async (req, res) => {
   try {
     const cronSecret = req.headers['x-cron-secret'];
@@ -343,6 +339,7 @@ app.post('/cron/close-auctions', async (req, res) => {
   }
 });
 
+// Cron: Dutch price drop
 app.post('/cron/dutch-price-drop', async (req, res) => {
   try {
     const cronSecret = req.headers['x-cron-secret'];
@@ -377,6 +374,7 @@ app.post('/cron/dutch-price-drop', async (req, res) => {
   }
 });
 
+// Cron: Payment deadlines
 app.post('/cron/payment-deadlines', async (req, res) => {
   try {
     const cronSecret = req.headers['x-cron-secret'];
@@ -397,6 +395,7 @@ app.post('/cron/payment-deadlines', async (req, res) => {
   }
 });
 
+// Upload file
 app.post('/upload/file', requireAuth, async (req, res) => {
   const { filename, content_type, listing_id, asset_type = 'asset' } = req.body;
   if (!filename || !content_type)
@@ -432,11 +431,80 @@ app.post('/upload/file', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// ADMIN ROUTES
+// ADMIN ROUTES (inline)
 // ============================================
-app.use('/api/admin', adminRoutes);
 
-// ============================================
+// Get stats
+app.get('/api/admin/stats', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+
+    const [usersCount, listingsCount, transactionsCount] = await Promise.all([
+      supabase.from('users').select('*', { count: 'exact', head: true }),
+      supabase.from('listings').select('*', { count: 'exact', head: true }),
+      supabase.from('transactions').select('*', { count: 'exact', head: true }),
+    ]);
+
+    res.json({
+      totalUsers: usersCount.count || 0,
+      totalListings: listingsCount.count || 0,
+      totalTransactions: transactionsCount.count || 0,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get users
+app.get('/api/admin/users', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, username, email, is_banned, vip_tier, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({ users: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ban user
+app.post('/api/admin/users/:userId/ban', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+
+    const { userId } = req.params;
+    await supabase
+      .from('users')
+      .update({ is_banned: true, banned_at: new Date().toISOString() })
+      .eq('id', userId);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Unban user
+app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
+  try {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
+
+    const { userId } = req.params;
+    await supabase
+      .from('users')
+      .update({ is_banned: false, banned_at: null })
+      .eq('id', userId);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================
 // STRIPE PAYMENT SHEET
@@ -491,7 +559,7 @@ app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// SUBSCRIPTIONS (Apex & Legend - Monthly/Yearly)
+// SUBSCRIPTIONS
 // ============================================
 app.post('/subscription/create', requireAuth, async (req, res) => {
   try {
@@ -502,15 +570,13 @@ app.post('/subscription/create', requireAuth, async (req, res) => {
 
     let priceId;
     if (tier === 'apex') {
-      priceId =
-        duration === 'monthly'
-          ? process.env.APEX_MONTHLY_PRICE_ID
-          : process.env.APEX_YEARLY_PRICE_ID;
+      priceId = duration === 'monthly'
+        ? process.env.APEX_MONTHLY_PRICE_ID
+        : process.env.APEX_YEARLY_PRICE_ID;
     } else {
-      priceId =
-        duration === 'monthly'
-          ? process.env.LEGEND_MONTHLY_PRICE_ID
-          : process.env.LEGEND_YEARLY_PRICE_ID;
+      priceId = duration === 'monthly'
+        ? process.env.LEGEND_MONTHLY_PRICE_ID
+        : process.env.LEGEND_YEARLY_PRICE_ID;
     }
 
     if (!priceId) {
@@ -595,7 +661,7 @@ app.post('/subscription/cancel', requireAuth, async (req, res) => {
 });
 
 // ============================================
-// CRYPTO PAYMENTS (WalletConnect)
+// CRYPTO PAYMENTS
 // ============================================
 app.post('/payment/crypto', requireAuth, async (req, res) => {
   try {
@@ -702,68 +768,55 @@ app.post('/webhook/crypto', express.json(), async (req, res) => {
 // ============================================
 // STRIPE WEBHOOK
 // ============================================
-app.post(
-  '/webhook/stripe',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-    } catch (err) {
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    if (event.type === 'invoice.payment_succeeded') {
-      const invoice = event.data.object;
-      const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-      const priceId = subscription.items.data[0].price.id;
-
-      let vipTier = 'builder';
-      if (
-        priceId === process.env.APEX_MONTHLY_PRICE_ID ||
-        priceId === process.env.APEX_YEARLY_PRICE_ID
-      ) {
-        vipTier = 'elite';
-      } else if (
-        priceId === process.env.LEGEND_MONTHLY_PRICE_ID ||
-        priceId === process.env.LEGEND_YEARLY_PRICE_ID
-      ) {
-        vipTier = 'legend';
-      }
-
-      await supabase
-        .from('users')
-        .update({ vip_tier: vipTier, is_apex_vip: true })
-        .eq('stripe_customer_id', subscription.customer);
-    }
-
-    if (event.type === 'customer.subscription.deleted') {
-      const subscription = event.data.object;
-      await supabase
-        .from('users')
-        .update({ vip_tier: 'builder', is_apex_vip: false })
-        .eq('stripe_customer_id', subscription.customer);
-    }
-
-    res.json({ received: true });
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-);
+
+  if (event.type === 'invoice.payment_succeeded') {
+    const invoice = event.data.object;
+    const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
+    const priceId = subscription.items.data[0].price.id;
+
+    let vipTier = 'builder';
+    if (priceId === process.env.APEX_MONTHLY_PRICE_ID || priceId === process.env.APEX_YEARLY_PRICE_ID) {
+      vipTier = 'elite';
+    } else if (priceId === process.env.LEGEND_MONTHLY_PRICE_ID || priceId === process.env.LEGEND_YEARLY_PRICE_ID) {
+      vipTier = 'legend';
+    }
+
+    await supabase
+      .from('users')
+      .update({ vip_tier: vipTier, is_apex_vip: true })
+      .eq('stripe_customer_id', subscription.customer);
+  }
+
+  if (event.type === 'customer.subscription.deleted') {
+    const subscription = event.data.object;
+    await supabase
+      .from('users')
+      .update({ vip_tier: 'builder', is_apex_vip: false })
+      .eq('stripe_customer_id', subscription.customer);
+  }
+
+  res.json({ received: true });
+});
 
 // ============================================
-// PUSH NOTIFICATIONS (Expo)
+// PUSH NOTIFICATIONS
 // ============================================
 app.post('/notifications/register-token', requireAuth, async (req, res) => {
   try {
     const { push_token } = req.body;
     if (!push_token) return res.status(400).json({ error: 'push_token required' });
 
-    await supabase
-      .from('users')
-      .update({ push_token })
-      .eq('id', req.user.id);
+    await supabase.from('users').update({ push_token }).eq('id', req.user.id);
     res.json({ success: true });
   } catch (err) {
     console.error('register token error:', err);
@@ -775,11 +828,7 @@ app.post('/notifications/send', requireAuth, async (req, res) => {
   try {
     const { user_id, title, body, data } = req.body;
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', req.user.id)
-      .single();
+    const { data: user } = await supabase.from('users').select('is_admin').eq('id', req.user.id).single();
     if (!user?.is_admin) return res.status(403).json({ error: 'Admin only' });
 
     const result = await sendPushNotification(user_id, title, body, data);
@@ -860,15 +909,12 @@ app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
       return res.status(400).json({ error: 'listing_id and amount required' });
 
     if (is_ghost) {
-      const { data: ghostResult, error: ghostError } = await supabase.rpc(
-        'place_ghost_bid',
-        {
-          p_listing_id: listing_id,
-          p_bidder_id: req.user.id,
-          p_amount: amount,
-          p_currency: currency,
-        }
-      );
+      const { data: ghostResult, error: ghostError } = await supabase.rpc('place_ghost_bid', {
+        p_listing_id: listing_id,
+        p_bidder_id: req.user.id,
+        p_amount: amount,
+        p_currency: currency,
+      });
       if (ghostError) return res.status(400).json({ error: ghostError.message });
       captureEvent('ghost_bid_placed', req.user.id, { listing_id, amount, currency });
       return res.json(ghostResult);
@@ -967,9 +1013,7 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
 
     const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
     if (paymentIntent.status !== 'succeeded') {
-      return res
-        .status(400)
-        .json({ error: `Payment incomplete. Status: ${paymentIntent.status}` });
+      return res.status(400).json({ error: `Payment incomplete. Status: ${paymentIntent.status}` });
     }
 
     const { data: existing } = await supabase
@@ -1160,7 +1204,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     features: {
       stripe_payment_sheet: true,
-      subscriptions: { apex: true, legend: true, monthly: true, yearly: true },
+      subscriptions: true,
       walletconnect_crypto: true,
       push_notifications: true,
       syndicate_rpc: true,
@@ -1168,20 +1212,9 @@ app.get('/health', (req, res) => {
       escrow_release: true,
       cron_jobs: true,
       admin_routes: true,
-      sentry: !!process.env.SENTRY_DSN && !!Sentry,
-      posthog: !!process.env.POSTHOG_API_KEY && !!posthog,
     },
   });
 });
-
-// ============================================
-// CLEANUP JOBS (DISABLED)
-// ============================================
-// runAllCleanups();  // DISABLED
-// cron.schedule('0 2 * * *', () => {
-//   console.log('🕐 Running scheduled cleanup jobs...');
-//   runAllCleanups();
-// });
 
 // ============================================
 // SENTRY ERROR HANDLER
@@ -1206,16 +1239,14 @@ server.listen(PORT, () => {
   console.log(`\n👑 BUILD.X Backend running on port ${PORT}\n`);
   console.log(`Features enabled:`);
   console.log(`  ✅ Stripe Payment Sheet`);
-  console.log(`  ✅ Apex/Legend Subscriptions (Monthly/Yearly)`);
+  console.log(`  ✅ Apex/Legend Subscriptions`);
   console.log(`  ✅ WalletConnect Crypto Payments`);
   console.log(`  ✅ Expo Push Notifications`);
   console.log(`  ✅ Voice/Audio (WebSocket)`);
   console.log(`  ✅ Syndicate RPC`);
   console.log(`  ✅ Escrow Release`);
-  console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
+  console.log(`  ✅ Cron Jobs`);
   console.log(`  ✅ Admin Routes`);
-  if (process.env.SENTRY_DSN && Sentry) console.log(`  ✅ Sentry Error Tracking`);
-  if (process.env.POSTHOG_API_KEY && posthog) console.log(`  ✅ PostHog Analytics`);
 });
 
 export default app;
