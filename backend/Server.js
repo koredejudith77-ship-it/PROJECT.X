@@ -14,7 +14,14 @@ import { nodeProfilingIntegration } from '@sentry/profiling-node';
 dotenv.config();
 
 // ============================================
-// SENTRY INITIALIZATION & MIDDLEWARE
+// INITIALIZE APP FIRST
+// ============================================
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+// ============================================
+// SENTRY (Only if DSN provided)
 // ============================================
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -24,13 +31,13 @@ if (process.env.SENTRY_DSN) {
     profilesSampleRate: 1.0,
     environment: process.env.NODE_ENV || 'production',
   });
-  
   app.use(Sentry.Handlers.requestHandler());
   app.use(Sentry.Handlers.tracingHandler());
-  console.log('✅ Sentry configured and enabled');
+  console.log('✅ Sentry configured');
 }
+
 // ============================================
-// POSTHOG - Analytics (Optional)
+// POSTHOG (Optional)
 // ============================================
 let posthog = null;
 if (process.env.POSTHOG_API_KEY) {
@@ -48,34 +55,24 @@ if (process.env.POSTHOG_API_KEY) {
 }
 
 // ============================================
-// INITIALIZATION
-// ============================================
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
-
-// ============================================
-// SENTRY REQUEST HANDLER
-// ============================================
-if (process.env.SENTRY_DSN) {
-  app.use(Sentry.Handlers.requestHandler());
-  app.use(Sentry.Handlers.tracingHandler());
-}
-
-// ============================================
 // SECURITY MIDDLEWARE
 // ============================================
 app.use(helmet());
 app.use(express.json({ limit: '500mb' }));
 app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
-app.use(cors({ 
-  origin: ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com', 'http://localhost:3000'],
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production'
+    ? ['https://buildx.com', 'https://www.buildx.com', 'https://app.buildx.com']
+    : ['http://localhost:3000', 'http://localhost:8081'],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
+// ============================================
+// CLIENTS
+// ============================================
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
@@ -85,7 +82,7 @@ const supabase = createClient(
 );
 
 // ============================================
-// POSTHOG HELPERS
+// POSTHOG HELPER
 // ============================================
 function captureEvent(eventName, userId, properties = {}) {
   if (posthog && userId) {
@@ -95,9 +92,7 @@ function captureEvent(eventName, userId, properties = {}) {
         event: eventName,
         properties: { timestamp: new Date().toISOString(), ...properties },
       });
-    } catch (err) {
-      // silent fail
-    }
+    } catch (err) { /* silent */ }
   }
 }
 
@@ -153,171 +148,6 @@ async function requireAuth(req, res, next) {
   req.user = user;
   next();
 }
-// ============================================
-// SOCIAL LOGIN (Google, Apple, GitHub)
-// ============================================
-
-// Initiate OAuth login
-app.post('/auth/social/:provider', async (req, res) => {
-  try {
-    const { provider } = req.params;
-    const allowed = ['google', 'apple', 'github'];
-    
-    if (!allowed.includes(provider)) {
-      return res.status(400).json({ error: 'Invalid provider' });
-    }
-    
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: {
-        redirectTo: `${process.env.FRONTEND_URL}/auth/callback`,
-      },
-    });
-    
-    if (error) throw error;
-    res.json({ url: data.url });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// OAuth callback (frontend handles this)
-app.get('/auth/callback', async (req, res) => {
-  // Frontend handles the callback from Supabase
-  // This endpoint just confirms the session
-  const { data: { session } } = await supabase.auth.getSession();
-  res.json({ session });
-});
-
-// ============================================
-// 2FA (Two-Factor Authentication)
-// ============================================
-
-// Enable 2FA for user
-app.post('/auth/2fa/enable', requireAuth, async (req, res) => {
-  try {
-    // Generate TOTP secret
-    const { data: factor, error } = await supabase.auth.mfa.enroll({
-      factorType: 'totp',
-      friendlyName: 'Authenticator App',
-    });
-    
-    if (error) throw error;
-    
-    // Store factor ID for later verification
-    await supabase
-      .from('users')
-      .update({ mfa_factor_id: factor.id })
-      .eq('id', req.user.id);
-    
-    res.json({
-      secret: factor.totp.secret,
-      qr_code: factor.totp.qr_code,
-      factor_id: factor.id,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Verify and activate 2FA
-app.post('/auth/2fa/verify', requireAuth, async (req, res) => {
-  try {
-    const { factor_id, code } = req.body;
-    
-    // Verify the TOTP code
-    const { data, error } = await supabase.auth.mfa.verify({
-      factorId: factor_id,
-      code,
-    });
-    
-    if (error) throw error;
-    
-    // Mark 2FA as enabled for user
-    await supabase
-      .from('users')
-      .update({ mfa_enabled: true })
-      .eq('id', req.user.id);
-    
-    res.json({ success: true, message: '2FA enabled successfully' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Login with 2FA (after email/password)
-app.post('/auth/login/2fa', async (req, res) => {
-  try {
-    const { email, password, code } = req.body;
-    
-    // First, sign in with email/password
-    const { data: signIn, error: signInError } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    
-    if (signInError) throw signInError;
-    
-    // Check if user has 2FA enabled
-    const { data: user } = await supabase
-      .from('users')
-      .select('mfa_enabled, mfa_factor_id')
-      .eq('id', signIn.user.id)
-      .single();
-    
-    if (!user?.mfa_enabled) {
-      // No 2FA, just return session
-      return res.json({ session: signIn.session, requires_2fa: false });
-    }
-    
-    // Verify 2FA code
-    const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
-      factorId: user.mfa_factor_id,
-      code,
-      challengeId: signIn.session?.access_token,
-    });
-    
-    if (verifyError) throw verifyError;
-    
-    res.json({ session: verifyData, requires_2fa: true, verified: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Disable 2FA
-app.post('/auth/2fa/disable', requireAuth, async (req, res) => {
-  try {
-    const { factor_id } = req.body;
-    
-    const { error } = await supabase.auth.mfa.unenroll({ factorId: factor_id });
-    if (error) throw error;
-    
-    await supabase
-      .from('users')
-      .update({ mfa_enabled: false, mfa_factor_id: null })
-      .eq('id', req.user.id);
-    
-    res.json({ success: true, message: '2FA disabled' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get 2FA status
-app.get('/auth/2fa/status', requireAuth, async (req, res) => {
-  try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('mfa_enabled, mfa_factor_id')
-      .eq('id', req.user.id)
-      .single();
-    
-    res.json({ enabled: user?.mfa_enabled || false });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // ============================================
 // RATE LIMITING
@@ -365,34 +195,22 @@ function generateCertNumber() {
 
 async function sendExpoPushNotification(pushToken, title, body, data = {}) {
   if (!pushToken) return false;
-
   const message = { to: pushToken, sound: 'default', title, body, data };
-
   try {
     const response = await fetch('https://exp.host/--/api/v2/push/send', {
       method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Accept-Encoding': 'gzip, deflate',
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Accept': 'application/json', 'Accept-Encoding': 'gzip, deflate', 'Content-Type': 'application/json' },
       body: JSON.stringify(message),
     });
     const result = await response.json();
     return result.data?.status === 'ok';
   } catch (error) {
-    console.error('Expo push error:', error);
     return false;
   }
 }
 
 async function sendPushNotification(userId, title, body, data = {}) {
-  const { data: user } = await supabase
-    .from('users')
-    .select('push_token')
-    .eq('id', userId)
-    .single();
-
+  const { data: user } = await supabase.from('users').select('push_token').eq('id', userId).single();
   if (!user?.push_token) return false;
   return sendExpoPushNotification(user.push_token, title, body, data);
 }
@@ -409,10 +227,97 @@ async function sendEmail({ to, subject, html, text, from = process.env.EMAIL_FRO
     if (error) throw error;
     return { success: true, data };
   } catch (error) {
-    console.error('Email send error:', error);
     return { success: false, error: error.message };
   }
 }
+
+// ============================================
+// SOCIAL LOGIN (Google, Apple, GitHub)
+// ============================================
+app.post('/auth/social/:provider', async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const allowed = ['google', 'apple', 'github'];
+    if (!allowed.includes(provider)) return res.status(400).json({ error: 'Invalid provider' });
+
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider,
+      options: { redirectTo: `${process.env.FRONTEND_URL}/auth/callback` },
+    });
+    if (error) throw error;
+    res.json({ url: data.url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/auth/callback', async (req, res) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  res.json({ session });
+});
+
+// ============================================
+// 2FA (Two-Factor Authentication)
+// ============================================
+app.post('/auth/2fa/enable', requireAuth, async (req, res) => {
+  try {
+    const { data: factor, error } = await supabase.auth.mfa.enroll({ factorType: 'totp', friendlyName: 'Authenticator App' });
+    if (error) throw error;
+    await supabase.from('users').update({ mfa_factor_id: factor.id }).eq('id', req.user.id);
+    res.json({ secret: factor.totp.secret, qr_code: factor.totp.qr_code, factor_id: factor.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/auth/2fa/verify', requireAuth, async (req, res) => {
+  try {
+    const { factor_id, code } = req.body;
+    const { error } = await supabase.auth.mfa.verify({ factorId: factor_id, code });
+    if (error) throw error;
+    await supabase.from('users').update({ mfa_enabled: true }).eq('id', req.user.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/auth/login/2fa', async (req, res) => {
+  try {
+    const { email, password, code } = req.body;
+    const { data: signIn, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    if (signInError) throw signInError;
+
+    const { data: user } = await supabase.from('users').select('mfa_enabled, mfa_factor_id').eq('id', signIn.user.id).single();
+    if (!user?.mfa_enabled) return res.json({ session: signIn.session, requires_2fa: false });
+
+    const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({ factorId: user.mfa_factor_id, code });
+    if (verifyError) throw verifyError;
+    res.json({ session: verifyData, requires_2fa: true, verified: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/auth/2fa/disable', requireAuth, async (req, res) => {
+  try {
+    const { factor_id } = req.body;
+    await supabase.auth.mfa.unenroll({ factorId: factor_id });
+    await supabase.from('users').update({ mfa_enabled: false, mfa_factor_id: null }).eq('id', req.user.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/auth/2fa/status', requireAuth, async (req, res) => {
+  try {
+    const { data: user } = await supabase.from('users').select('mfa_enabled').eq('id', req.user.id).single();
+    res.json({ enabled: user?.mfa_enabled || false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================
 // ADMIN ROUTES
@@ -420,18 +325,12 @@ async function sendEmail({ to, subject, html, text, from = process.env.EMAIL_FRO
 app.get('/api/admin/stats', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
-
-    const [usersCount, listingsCount, transactionsCount] = await Promise.all([
+    const [users, listings, transactions] = await Promise.all([
       supabase.from('users').select('*', { count: 'exact', head: true }),
       supabase.from('listings').select('*', { count: 'exact', head: true }),
       supabase.from('transactions').select('*', { count: 'exact', head: true }),
     ]);
-
-    res.json({
-      totalUsers: usersCount.count || 0,
-      totalListings: listingsCount.count || 0,
-      totalTransactions: transactionsCount.count || 0,
-    });
+    res.json({ totalUsers: users.count || 0, totalListings: listings.count || 0, totalTransactions: transactions.count || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -440,12 +339,7 @@ app.get('/api/admin/stats', requireAuth, async (req, res) => {
 app.get('/api/admin/users', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
-
-    const { data, error } = await supabase
-      .from('users')
-      .select('id, username, email, is_banned, vip_tier, created_at')
-      .order('created_at', { ascending: false });
-
+    const { data, error } = await supabase.from('users').select('id, username, email, is_banned, vip_tier, created_at').order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ users: data });
   } catch (err) {
@@ -456,13 +350,7 @@ app.get('/api/admin/users', requireAuth, async (req, res) => {
 app.post('/api/admin/users/:userId/ban', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
-
-    const { userId } = req.params;
-    await supabase
-      .from('users')
-      .update({ is_banned: true, banned_at: new Date().toISOString() })
-      .eq('id', userId);
-
+    await supabase.from('users').update({ is_banned: true, banned_at: new Date().toISOString() }).eq('id', req.params.userId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -472,13 +360,7 @@ app.post('/api/admin/users/:userId/ban', requireAuth, async (req, res) => {
 app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
   try {
     if (!req.user.is_admin) return res.status(403).json({ error: 'Admin only' });
-
-    const { userId } = req.params;
-    await supabase
-      .from('users')
-      .update({ is_banned: false, banned_at: null })
-      .eq('id', userId);
-
+    await supabase.from('users').update({ is_banned: false, banned_at: null }).eq('id', req.params.userId);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -489,33 +371,14 @@ app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
 // CRON ROUTES
 // ============================================
 app.post('/cron/close-auctions', async (req, res) => {
-  const cronSecret = req.headers['x-cron-secret'];
-  if (cronSecret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const { data: endedAuctions } = await supabase
-    .from('listings')
-    .update({ status: 'ended' })
-    .eq('status', 'live')
-    .lt('ends_at', new Date().toISOString())
-    .select();
-
-  res.json({ closed: endedAuctions?.length || 0 });
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  const { data } = await supabase.from('listings').update({ status: 'ended' }).eq('status', 'live').lt('ends_at', new Date().toISOString()).select();
+  res.json({ closed: data?.length || 0 });
 });
 
 app.post('/cron/dutch-price-drop', async (req, res) => {
-  const cronSecret = req.headers['x-cron-secret'];
-  if (cronSecret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const { data: dutchAuctions } = await supabase
-    .from('listings')
-    .select('id, current_bid, starting_bid, auction_data')
-    .eq('auction_type', 'dutch')
-    .eq('status', 'live');
-
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  const { data: dutchAuctions } = await supabase.from('listings').select('id, current_bid, starting_bid, auction_data').eq('auction_type', 'dutch').eq('status', 'live');
   let dropped = 0;
   for (const auction of dutchAuctions || []) {
     const dropAmount = auction.auction_data?.drop_amount || 10;
@@ -529,17 +392,8 @@ app.post('/cron/dutch-price-drop', async (req, res) => {
 });
 
 app.post('/cron/payment-deadlines', async (req, res) => {
-  const cronSecret = req.headers['x-cron-secret'];
-  if (cronSecret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
-  const expired = await supabase
-    .from('listings')
-    .update({ status: 'ended', winner_id: null })
-    .eq('status', 'sold')
-    .lt('payment_deadline', new Date().toISOString());
-
+  if (req.headers['x-cron-secret'] !== process.env.CRON_SECRET) return res.status(401).json({ error: 'Unauthorized' });
+  const expired = await supabase.from('listings').update({ status: 'ended', winner_id: null }).eq('status', 'sold').lt('payment_deadline', new Date().toISOString());
   res.json({ expired: expired.data?.length || 0 });
 });
 
@@ -548,111 +402,71 @@ app.post('/cron/payment-deadlines', async (req, res) => {
 // ============================================
 app.post('/upload/file', requireAuth, async (req, res) => {
   const { filename, content_type, listing_id, asset_type = 'asset' } = req.body;
-  if (!filename || !content_type)
-    return res.status(400).json({ error: 'filename and content_type required' });
+  if (!filename || !content_type) return res.status(400).json({ error: 'filename and content_type required' });
 
   if (listing_id) {
-    const { data: listing } = await supabase
-      .from('listings')
-      .select('seller_id')
-      .eq('id', listing_id)
-      .single();
-    if (listing?.seller_id !== req.user.id)
-      return res.status(403).json({ error: 'Not your listing' });
+    const { data: listing } = await supabase.from('listings').select('seller_id').eq('id', listing_id).single();
+    if (listing?.seller_id !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
   }
 
   const bucket = asset_type === 'preview' ? 'previews' : 'assets';
-  const timestamp = Date.now();
-  const key = `${bucket}/${req.user.id}/${timestamp}-${filename}`;
-  const { data: signedUrl, error: signedError } = await supabase.storage
-    .from(bucket)
-    .createSignedUploadUrl(key);
+  const key = `${bucket}/${req.user.id}/${Date.now()}-${filename}`;
+  const { data: signedUrl, error: signedError } = await supabase.storage.from(bucket).createSignedUploadUrl(key);
   if (signedError) throw signedError;
 
   if (listing_id) {
     const field = asset_type === 'preview' ? 'preview_path' : 'file_path';
     await supabase.from('listings').update({ [field]: key }).eq('id', listing_id);
   }
-
   res.json({ upload_url: signedUrl, file_path: key });
 });
 
 // ============================================
-// PAYMENT ROUTES (Stripe + Crypto)
+// STRIPE PAYMENT SHEET
 // ============================================
 app.post('/payment/payment-sheet', requireAuth, async (req, res) => {
   try {
     const { amount, currency = 'usd', listing_id } = req.body;
     if (!amount) return res.status(400).json({ error: 'Amount required' });
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('stripe_customer_id')
-      .eq('id', req.user.id)
-      .single();
-
+    const { data: user } = await supabase.from('users').select('stripe_customer_id').eq('id', req.user.id).single();
     let customerId = user?.stripe_customer_id;
+
     if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: req.user.email,
-        metadata: { supabase_id: req.user.id },
-      });
+      const customer = await stripe.customers.create({ email: req.user.email, metadata: { supabase_id: req.user.id } });
       customerId = customer.id;
       await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', req.user.id);
     }
 
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(amount * 100),
-      currency,
-      customer: customerId,
-      payment_method_types: ['card'],
+      amount: Math.round(amount * 100), currency, customer: customerId, payment_method_types: ['card'],
       metadata: { listing_id, user_id: req.user.id },
     });
-
-    const ephemeralKey = await stripe.ephemeralKeys.create(
-      { customer: customerId },
-      { apiVersion: '2025-02-24' }
-    );
-
-    res.json({
-      paymentIntent: paymentIntent.client_secret,
-      ephemeralKey: ephemeralKey.secret,
-      customer: customerId,
-    });
+    const ephemeralKey = await stripe.ephemeralKeys.create({ customer: customerId }, { apiVersion: '2025-02-24' });
+    res.json({ paymentIntent: paymentIntent.client_secret, ephemeralKey: ephemeralKey.secret, customer: customerId });
   } catch (err) {
-    console.error('payment-sheet error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// SUBSCRIPTIONS
+// ============================================
 app.post('/subscription/create', requireAuth, async (req, res) => {
   try {
     const { tier, duration = 'monthly', payment_method_id } = req.body;
-    if (!tier || !['apex', 'legend'].includes(tier)) {
-      return res.status(400).json({ error: 'Valid tier required: apex or legend' });
-    }
+    if (!tier || !['apex', 'legend'].includes(tier)) return res.status(400).json({ error: 'Valid tier required: apex or legend' });
 
-    let priceId;
-    if (tier === 'apex') {
-      priceId = duration === 'monthly' ? process.env.APEX_MONTHLY_PRICE_ID : process.env.APEX_YEARLY_PRICE_ID;
-    } else {
-      priceId = duration === 'monthly' ? process.env.LEGEND_MONTHLY_PRICE_ID : process.env.LEGEND_YEARLY_PRICE_ID;
-    }
-
+    const priceId = tier === 'apex'
+      ? (duration === 'monthly' ? process.env.APEX_MONTHLY_PRICE_ID : process.env.APEX_YEARLY_PRICE_ID)
+      : (duration === 'monthly' ? process.env.LEGEND_MONTHLY_PRICE_ID : process.env.LEGEND_YEARLY_PRICE_ID);
     if (!priceId) return res.status(400).json({ error: 'Price ID not configured' });
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('stripe_customer_id, email')
-      .eq('id', req.user.id)
-      .single();
-
+    const { data: user } = await supabase.from('users').select('stripe_customer_id, email').eq('id', req.user.id).single();
     let customerId = user?.stripe_customer_id;
+
     if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-        metadata: { supabase_id: req.user.id },
-      });
+      const customer = await stripe.customers.create({ email: user.email, metadata: { supabase_id: req.user.id } });
       customerId = customer.id;
       await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', req.user.id);
     }
@@ -663,32 +477,18 @@ app.post('/subscription/create', requireAuth, async (req, res) => {
     }
 
     const subscription = await stripe.subscriptions.create({
-      customer: customerId,
-      items: [{ price: priceId }],
-      payment_behavior: 'default_incomplete',
-      expand: ['latest_invoice.payment_intent'],
-      metadata: { tier, duration, user_id: req.user.id },
+      customer: customerId, items: [{ price: priceId }], payment_behavior: 'default_incomplete',
+      expand: ['latest_invoice.payment_intent'], metadata: { tier, duration, user_id: req.user.id },
     });
 
     const vipTier = tier === 'apex' ? 'elite' : 'legend';
     await supabase.from('users').update({
-      vip_tier: vipTier,
-      is_apex_vip: true,
-      subscription_tier: tier,
-      subscription_duration: duration,
-      subscription_id: subscription.id,
+      vip_tier: vipTier, is_apex_vip: true, subscription_tier: tier, subscription_duration: duration, subscription_id: subscription.id,
     }).eq('id', req.user.id);
 
     captureEvent('subscription_created', req.user.id, { tier, duration });
-
-    res.json({
-      subscription_id: subscription.id,
-      client_secret: subscription.latest_invoice?.payment_intent?.client_secret,
-      tier: vipTier,
-      duration,
-    });
+    res.json({ subscription_id: subscription.id, client_secret: subscription.latest_invoice?.payment_intent?.client_secret, tier: vipTier, duration });
   } catch (err) {
-    console.error('subscription create error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -697,52 +497,35 @@ app.post('/subscription/cancel', requireAuth, async (req, res) => {
   try {
     const { subscription_id } = req.body;
     if (!subscription_id) return res.status(400).json({ error: 'subscription_id required' });
-
     const subscription = await stripe.subscriptions.update(subscription_id, { cancel_at_period_end: true });
     res.json({ subscription_id: subscription.id, cancel_at_period_end: true });
   } catch (err) {
-    console.error('subscription cancel error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// CRYPTO PAYMENTS
+// ============================================
 app.post('/payment/crypto', requireAuth, async (req, res) => {
   try {
     const { listing_id, amount, currency = 'ETH', wallet_address } = req.body;
-    if (!listing_id || !amount || !wallet_address) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
+    if (!listing_id || !amount || !wallet_address) return res.status(400).json({ error: 'Missing required fields' });
 
     const { data: listing } = await supabase.from('listings').select('id, seller_id').eq('id', listing_id).single();
     if (!listing) return res.status(404).json({ error: 'Listing not found' });
 
     const paymentId = generateSecureToken();
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-
     const { data: payment, error } = await supabase.from('crypto_payments').insert({
-      id: paymentId,
-      listing_id,
-      buyer_id: req.user.id,
-      seller_id: listing.seller_id,
-      amount,
-      currency,
-      wallet_address,
-      status: 'pending',
-      expires_at: expiresAt,
+      id: paymentId, listing_id, buyer_id: req.user.id, seller_id: listing.seller_id, amount, currency,
+      wallet_address, status: 'pending', expires_at: expiresAt,
     }).select().single();
 
     if (error) throw error;
     captureEvent('crypto_payment_initiated', req.user.id, { listing_id, amount, currency });
-
-    res.json({
-      payment_id: paymentId,
-      wallet_address: process.env.CRYPTO_WALLET_ADDRESS || '0x...',
-      amount,
-      currency,
-      expires_at: expiresAt,
-    });
+    res.json({ payment_id: paymentId, wallet_address: process.env.CRYPTO_WALLET_ADDRESS || '0x...', amount, currency, expires_at: expiresAt });
   } catch (err) {
-    console.error('crypto payment error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -752,41 +535,32 @@ app.post('/webhook/crypto', express.json(), async (req, res) => {
     const { payment_id, transaction_hash, status } = req.body;
     if (status === 'confirmed') {
       const { data: payment } = await supabase.from('crypto_payments').update({
-        status: 'confirmed',
-        transaction_hash,
-        confirmed_at: new Date().toISOString(),
+        status: 'confirmed', transaction_hash, confirmed_at: new Date().toISOString(),
       }).eq('id', payment_id).select().single();
 
       if (payment) {
         await supabase.from('transactions').insert({
-          listing_id: payment.listing_id,
-          buyer_id: payment.buyer_id,
-          seller_id: payment.seller_id,
-          amount: payment.amount,
-          currency: payment.currency,
-          platform_fee: payment.amount * 0.1,
-          seller_amount: payment.amount * 0.9,
-          payment_method: 'crypto',
-          payment_reference: transaction_hash,
-          escrow_status: 'holding',
-          delivery_status: 'pending',
+          listing_id: payment.listing_id, buyer_id: payment.buyer_id, seller_id: payment.seller_id, amount: payment.amount,
+          currency: payment.currency, platform_fee: payment.amount * 0.1, seller_amount: payment.amount * 0.9,
+          payment_method: 'crypto', payment_reference: transaction_hash, escrow_status: 'holding', delivery_status: 'pending',
         });
         await sendPushNotification(payment.buyer_id, 'Crypto Payment Confirmed', `Payment of ${payment.amount} ${payment.currency} confirmed.`);
       }
     }
     res.json({ received: true });
   } catch (err) {
-    console.error('crypto webhook error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// STRIPE WEBHOOK
+// ============================================
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
@@ -796,11 +570,8 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
     const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
     const priceId = subscription.items.data[0].price.id;
     let vipTier = 'builder';
-    if (priceId === process.env.APEX_MONTHLY_PRICE_ID || priceId === process.env.APEX_YEARLY_PRICE_ID) {
-      vipTier = 'elite';
-    } else if (priceId === process.env.LEGEND_MONTHLY_PRICE_ID || priceId === process.env.LEGEND_YEARLY_PRICE_ID) {
-      vipTier = 'legend';
-    }
+    if (priceId === process.env.APEX_MONTHLY_PRICE_ID || priceId === process.env.APEX_YEARLY_PRICE_ID) vipTier = 'elite';
+    else if (priceId === process.env.LEGEND_MONTHLY_PRICE_ID || priceId === process.env.LEGEND_YEARLY_PRICE_ID) vipTier = 'legend';
     await supabase.from('users').update({ vip_tier: vipTier, is_apex_vip: true }).eq('stripe_customer_id', subscription.customer);
   }
 
@@ -811,6 +582,9 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
   res.json({ received: true });
 });
 
+// ============================================
+// PUSH NOTIFICATIONS
+// ============================================
 app.post('/notifications/register-token', requireAuth, async (req, res) => {
   try {
     const { push_token } = req.body;
@@ -822,6 +596,9 @@ app.post('/notifications/register-token', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// BID PLACEMENT
+// ============================================
 app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
   try {
     const { listing_id, amount, currency = 'USD', is_ghost = false } = req.body;
@@ -829,10 +606,7 @@ app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
 
     if (is_ghost) {
       const { data: ghostResult, error: ghostError } = await supabase.rpc('place_ghost_bid', {
-        p_listing_id: listing_id,
-        p_bidder_id: req.user.id,
-        p_amount: amount,
-        p_currency: currency,
+        p_listing_id: listing_id, p_bidder_id: req.user.id, p_amount: amount, p_currency: currency,
       });
       if (ghostError) return res.status(400).json({ error: ghostError.message });
       captureEvent('ghost_bid_placed', req.user.id, { listing_id, amount, currency });
@@ -840,10 +614,7 @@ app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
     }
 
     const { data: result, error } = await supabase.rpc('place_bid_locked', {
-      p_listing_id: listing_id,
-      p_bidder_id: req.user.id,
-      p_amount: amount,
-      p_currency: currency,
+      p_listing_id: listing_id, p_bidder_id: req.user.id, p_amount: amount, p_currency: currency,
     });
 
     if (error) return res.status(400).json({ error: error.message });
@@ -857,20 +628,17 @@ app.post('/bid/place', requireAuth, bidRateLimit, async (req, res) => {
     captureEvent('bid_placed', req.user.id, { listing_id, amount, currency });
     res.json(result);
   } catch (err) {
-    console.error('bid placement error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// PAYMENT INTENT
+// ============================================
 app.post('/payment/create-intent', requireAuth, async (req, res) => {
   try {
     const { listing_id, amount_cents, currency, seller_stripe_account } = req.body;
-    const { data: listing, error: listingError } = await supabase
-      .from('listings')
-      .select('id, status, current_bidder_id, seller_id')
-      .eq('id', listing_id)
-      .single();
-
+    const { data: listing, error: listingError } = await supabase.from('listings').select('id, status, current_bidder_id, seller_id').eq('id', listing_id).single();
     if (listingError || !listing) return res.status(404).json({ error: 'Listing not found' });
     if (listing.status === 'sold') return res.status(400).json({ error: 'Auction already paid' });
     if (listing.current_bidder_id !== req.user.id) return res.status(403).json({ error: 'Not winning bidder' });
@@ -878,34 +646,27 @@ app.post('/payment/create-intent', requireAuth, async (req, res) => {
     const { data: seller } = await supabase.from('users').select('is_apex_vip, stripe_account_id').eq('id', listing.seller_id).single();
     const rate = seller?.is_apex_vip ? 0.02 : 0.1;
     const platformFeeCents = Math.round(amount_cents * rate);
-
-    const intentParams = {
-      amount: amount_cents,
-      currency: currency ?? 'usd',
-      metadata: { listing_id, buyer_id: req.user.id, platform_fee_cents: platformFeeCents },
-    };
-
+    const intentParams = { amount: amount_cents, currency: currency ?? 'usd', metadata: { listing_id, buyer_id: req.user.id, platform_fee_cents: platformFeeCents } };
     const sellerAccount = seller_stripe_account || seller?.stripe_account_id;
     if (sellerAccount) {
       intentParams.application_fee_amount = platformFeeCents;
       intentParams.transfer_data = { destination: sellerAccount };
     }
-
     const paymentIntent = await stripe.paymentIntents.create(intentParams);
     res.json({ client_secret: paymentIntent.client_secret, payment_intent_id: paymentIntent.id, platform_fee_cents: platformFeeCents });
   } catch (err) {
-    console.error('create-intent error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// PAYMENT CONFIRM
+// ============================================
 app.post('/payment/confirm', requireAuth, async (req, res) => {
   try {
     const { payment_intent_id, listing_id } = req.body;
     const paymentIntent = await stripe.paymentIntents.retrieve(payment_intent_id);
-    if (paymentIntent.status !== 'succeeded') {
-      return res.status(400).json({ error: `Payment incomplete. Status: ${paymentIntent.status}` });
-    }
+    if (paymentIntent.status !== 'succeeded') return res.status(400).json({ error: `Payment incomplete. Status: ${paymentIntent.status}` });
 
     const { data: existing } = await supabase.from('transactions').select('id').eq('stripe_payment_intent_id', payment_intent_id).single();
     if (existing) return res.json({ transaction_id: existing.id, already_processed: true });
@@ -916,18 +677,10 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
     const sellerAmount = amount - platformFee;
 
     const { data: transaction, error: txError } = await supabase.from('transactions').insert({
-      listing_id,
-      buyer_id: req.user.id,
-      seller_id: listing.seller_id,
-      amount,
-      currency: listing.currency,
-      platform_fee: platformFee,
-      seller_amount: sellerAmount,
-      stripe_payment_intent_id: payment_intent_id,
-      escrow_status: 'holding',
-      delivery_status: 'pending',
+      listing_id, buyer_id: req.user.id, seller_id: listing.seller_id, amount, currency: listing.currency,
+      platform_fee: platformFee, seller_amount: sellerAmount, stripe_payment_intent_id: payment_intent_id,
+      escrow_status: 'holding', delivery_status: 'pending',
     }).select().single();
-
     if (txError) throw txError;
 
     const downloadToken = generateSecureToken();
@@ -941,10 +694,7 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
 
     const certNumber = generateCertNumber();
     const { data: cert } = await supabase.from('certificates').insert({
-      certificate_number: certNumber,
-      listing_id,
-      transaction_id: transaction.id,
-      buyer_id: req.user.id,
+      certificate_number: certNumber, listing_id, transaction_id: transaction.id, buyer_id: req.user.id,
     }).select().single();
 
     await supabase.from('vault').insert({ owner_id: req.user.id, listing_id, transaction_id: transaction.id, certificate_id: cert.id });
@@ -961,11 +711,13 @@ app.post('/payment/confirm', requireAuth, async (req, res) => {
     captureEvent('payment_confirmed', req.user.id, { listing_id, amount, transaction_id: transaction.id });
     res.json({ transaction_id: transaction.id, certificate_id: cert.id, download_token: downloadToken });
   } catch (err) {
-    console.error('confirm-payment error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// DOWNLOAD TOKEN
+// ============================================
 app.post('/download/generate-token', requireAuth, async (req, res) => {
   try {
     const { transaction_id } = req.body;
@@ -980,21 +732,20 @@ app.post('/download/generate-token', requireAuth, async (req, res) => {
     const { data: signedUrl } = await supabase.storage.from('assets').createSignedUrl(listing.file_path, 3600);
     res.json({ download_url: signedUrl, token, expires_at: expiry });
   } catch (err) {
-    console.error('generate-token error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// SYNDICATE JOIN
+// ============================================
 app.post('/syndicate/join', requireAuth, async (req, res) => {
   try {
     const { syndicate_id, amount, currency = 'USD' } = req.body;
     if (!syndicate_id || !amount) return res.status(400).json({ error: 'syndicate_id and amount required' });
 
     const { data: result, error } = await supabase.rpc('syndicate_join', {
-      p_syndicate_id: syndicate_id,
-      p_user_id: req.user.id,
-      p_amount: amount,
-      p_currency: currency,
+      p_syndicate_id: syndicate_id, p_user_id: req.user.id, p_amount: amount, p_currency: currency,
     });
 
     if (error) return res.status(400).json({ error: error.message });
@@ -1008,11 +759,13 @@ app.post('/syndicate/join', requireAuth, async (req, res) => {
     captureEvent('syndicate_joined', req.user.id, { syndicate_id, amount, currency });
     res.json(result);
   } catch (err) {
-    console.error('syndicate join error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// ============================================
+// VOICE ROOM
+// ============================================
 app.get('/voice/room/:listingId', requireAuth, async (req, res) => {
   try {
     const { listingId } = req.params;
@@ -1024,17 +777,16 @@ app.get('/voice/room/:listingId', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// ESCROW RELEASE
+// ============================================
 app.post('/escrow/release', requireAuth, async (req, res) => {
   try {
     const { transaction_id } = req.body;
     const { data: transaction } = await supabase.from('transactions').select('id, seller_id, escrow_status').eq('id', transaction_id).single();
     if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
-    if (transaction.seller_id !== req.user.id && !req.user.is_admin) {
-      return res.status(403).json({ error: 'Only seller can release escrow' });
-    }
-    if (transaction.escrow_status !== 'holding') {
-      return res.status(400).json({ error: 'Escrow not in holding state' });
-    }
+    if (transaction.seller_id !== req.user.id && !req.user.is_admin) return res.status(403).json({ error: 'Only seller can release escrow' });
+    if (transaction.escrow_status !== 'holding') return res.status(400).json({ error: 'Escrow not in holding state' });
 
     await supabase.from('transactions').update({ escrow_status: 'released', released_at: new Date().toISOString() }).eq('id', transaction_id);
     const { data: buyer } = await supabase.from('transactions').select('buyer_id').eq('id', transaction_id).single();
@@ -1045,20 +797,18 @@ app.post('/escrow/release', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================
+// HEALTH CHECK
+// ============================================
 app.get('/health', (req, res) => {
   res.json({
     status: 'BUILD.X backend live 🚀',
     timestamp: new Date().toISOString(),
     features: {
-      stripe_payment_sheet: true,
-      subscriptions: true,
-      walletconnect_crypto: true,
-      push_notifications: true,
-      syndicate_rpc: true,
-      voice_audio: true,
-      escrow_release: true,
-      cron_jobs: true,
-      admin_routes: true,
+      stripe_payment_sheet: true, subscriptions: true, walletconnect_crypto: true,
+      push_notifications: true, syndicate_rpc: true, voice_audio: true,
+      escrow_release: true, cron_jobs: true, admin_routes: true,
+      social_login: true, two_factor_auth: true,
     },
   });
 });
@@ -1094,6 +844,8 @@ server.listen(PORT, () => {
   console.log(`  ✅ Escrow Release`);
   console.log(`  ✅ Cron Jobs`);
   console.log(`  ✅ Admin Routes`);
+  console.log(`  ✅ Social Login (Google/Apple/GitHub)`);
+  console.log(`  ✅ Two-Factor Authentication (2FA)`);
 });
 
 export default app;
