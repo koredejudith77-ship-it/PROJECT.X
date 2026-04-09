@@ -31,21 +31,18 @@ const wss = new WebSocketServer({ server });
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
-    integrations: [
-      Sentry.httpIntegration(),
-      Sentry.expressIntegration(),
-      nodeProfilingIntegration(),
-    ],
     tracesSampleRate: 1.0,
-    profilesSampleRate: 1.0,
     environment: process.env.NODE_ENV || 'production',
   });
   
-  // Request handler must be the first middleware
-  app.use(Sentry.Handlers.requestHandler());
-  app.use(Sentry.Handlers.tracingHandler());
-  
-  console.log('✅ Sentry configured');
+  // For v8, Handlers might not exist - check first
+  if (Sentry.Handlers) {
+    app.use(Sentry.Handlers.requestHandler());
+    app.use(Sentry.Handlers.tracingHandler());
+    console.log('✅ Sentry configured with handlers');
+  } else {
+    console.log('✅ Sentry initialized (basic mode)');
+  }
 }
 
 // ============================================
