@@ -735,7 +735,6 @@ app.post('/download/generate-token', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================
 // SYNDICATE JOIN
 // ============================================
@@ -796,6 +795,7 @@ app.post('/escrow/release', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // ============================================
 // HEALTH CHECK
