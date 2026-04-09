@@ -14,7 +14,7 @@ import cron from 'node-cron';
 // IMPORT NEW ROUTES
 // ============================================
 import adminRoutes from './routes/admin.js';
-import { runAllCleanups } from './jobs/cleanupTempFiles.js';
+// import { runAllCleanups } from './jobs/cleanupTempFiles.js';  // COMMENTED OUT
 
 dotenv.config();
 
@@ -436,7 +436,7 @@ app.post('/upload/file', requireAuth, async (req, res) => {
 // ============================================
 app.use('/api/admin', adminRoutes);
 
-// ===========================================
+// ============================================
 
 // ============================================
 // STRIPE PAYMENT SHEET
@@ -1168,7 +1168,6 @@ app.get('/health', (req, res) => {
       escrow_release: true,
       cron_jobs: true,
       admin_routes: true,
-      forge_routes: true,
       sentry: !!process.env.SENTRY_DSN && !!Sentry,
       posthog: !!process.env.POSTHOG_API_KEY && !!posthog,
     },
@@ -1176,16 +1175,13 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================
-// CLEANUP JOBS (Run daily at 2 AM)
+// CLEANUP JOBS (DISABLED)
 // ============================================
-// Run once at startup
-runAllCleanups();
-
-// Schedule daily cleanup at 2 AM
-cron.schedule('0 2 * * *', () => {
-  console.log('🕐 Running scheduled cleanup jobs...');
-  runAllCleanups();
-});
+// runAllCleanups();  // DISABLED
+// cron.schedule('0 2 * * *', () => {
+//   console.log('🕐 Running scheduled cleanup jobs...');
+//   runAllCleanups();
+// });
 
 // ============================================
 // SENTRY ERROR HANDLER
@@ -1207,7 +1203,7 @@ app.use((err, req, res, next) => {
 // ============================================
 const PORT = process.env.PORT ?? 3000;
 server.listen(PORT, () => {
-  console.log(`\n👑 BUILD.X Backend (Complete) running on port ${PORT}\n`);
+  console.log(`\n👑 BUILD.X Backend running on port ${PORT}\n`);
   console.log(`Features enabled:`);
   console.log(`  ✅ Stripe Payment Sheet`);
   console.log(`  ✅ Apex/Legend Subscriptions (Monthly/Yearly)`);
@@ -1218,10 +1214,8 @@ server.listen(PORT, () => {
   console.log(`  ✅ Escrow Release`);
   console.log(`  ✅ Cron Jobs (Auctions, Dutch, Payments)`);
   console.log(`  ✅ Admin Routes`);
-  console.log(`  ✅ X.FORGE Routes`);
-  console.log(`  ✅ Cleanup Jobs (Daily at 2 AM)`);
   if (process.env.SENTRY_DSN && Sentry) console.log(`  ✅ Sentry Error Tracking`);
   if (process.env.POSTHOG_API_KEY && posthog) console.log(`  ✅ PostHog Analytics`);
 });
 
-export default app; 
+export default app;
