@@ -783,7 +783,6 @@ app.post('/bid/place', requireAuth, csrfProtection, bidRateLimit, async (req, re
     res.status(500).json({ error: err.message });
   }
 });
-
 // ============================================
 // PAYMENT INTENT
 // ============================================
@@ -998,7 +997,7 @@ app.get('/health', async (req, res) => {
 // ============================================
 // SENTRY ERROR HANDLER
 // ============================================
-if (process.env.SENTRY_DSN) {
+if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
 }
 
