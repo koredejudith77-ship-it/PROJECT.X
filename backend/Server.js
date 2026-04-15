@@ -13,6 +13,9 @@ import { nodeProfilingIntegration } from '@sentry/profiling-node';
 import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
+import rateLimit from 'express-rate-limit';
+import RedisStore from 'rate-limit-redis';
+import redis from './lib/redis.js';
 import { body, validationResult } from 'express-validator';
 import csrf from 'csurf';
 
@@ -128,22 +131,22 @@ app.use(cors({
 // RATE LIMITING
 // ============================================
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
+  store: new RedisStore({ client: redis, prefix: 'rl:global:' }),
+  windowMs: 60 * 1000,
+  max: 100,
   message: 'Too many requests, please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
 });
 
 const authLimiter = rateLimit({
+  store: new RedisStore({ client: redis, prefix: 'rl:auth:' }),
   windowMs: 15 * 60 * 1000,
-  max: 5,
-  skipSuccessfulRequests: true,
+  max: 10,
+  message: 'Too many authentication attempts, please try again later.',
 });
 
+// Apply them
 app.use('/api/', globalLimiter);
 app.use('/auth/', authLimiter);
-
 // ============================================
 // CLIENTS
 // ============================================
