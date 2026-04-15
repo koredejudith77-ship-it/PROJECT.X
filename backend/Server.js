@@ -13,7 +13,7 @@ import { nodeProfilingIntegration } from '@sentry/profiling-node';
 import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
-import rateLimit from 'express-rate-limit';
+import expressRateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import redis from './lib/redis.js';
 import { body, validationResult } from 'express-validator';
