@@ -1,11 +1,14 @@
 import Redis from 'ioredis';
 
 const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
-if (!redisUrl) console.error('❌ Missing UPSTASH_REDIS_REST_URL');
+let redis = null;
 
-const redis = new Redis(redisUrl);
-
-redis.on('connect', () => console.log('✅ Redis connected'));
-redis.on('error', (err) => console.error('❌ Redis error:', err));
+if (redisUrl) {
+  redis = new Redis(redisUrl);
+  redis.on('connect', () => console.log('✅ Redis connected'));
+  redis.on('error', (err) => console.error('❌ Redis error:', err));
+} else {
+  console.warn('⚠️ UPSTASH_REDIS_REST_URL not set. Redis disabled.');
+}
 
 export default redis;
