@@ -130,21 +130,36 @@ app.use(cors({
 // ============================================
 // RATE LIMITING
 // ============================================
-const globalLimiter = rateLimit({
-  store: new RedisStore({ client: redis, prefix: 'rl:global:' }),
-  windowMs: 60 * 1000,
-  max: 100,
-  message: 'Too many requests, please try again later.',
+const createRedisStore = () => {
+    // If Redis is not available, return 'undefined' so the rate-limiter falls back to memory store
+    if (!redis) return undefined;
+
+    // The key is to provide a 'sendCommand' function.
+    // This function takes the raw Redis command and its arguments, and uses the ioredis
+    // client's 'call' method to execute it. This is what the 'rate-limit-redis' package expects.
+    return new RedisStore({
+        sendCommand: (...args) => redis.call(...args),
+        // The prefix helps organize your keys in Redis
+        prefix: 'rl:'
+    });
+};
+
+// Your rate limiters, now correctly configured
+const globalLimiter = expressRateLimit({
+    store: createRedisStore(),
+    windowMs: 60 * 1000, // 1 minute
+    max: 100,
+    message: 'Too many requests, please try again later.',
 });
 
-const authLimiter = rateLimit({
-  store: new RedisStore({ client: redis, prefix: 'rl:auth:' }),
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: 'Too many authentication attempts, please try again later.',
+const authLimiter = expressRateLimit({
+    store: createRedisStore(),
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10,
+    message: 'Too many authentication attempts, please try again later.',
 });
 
-// Apply them
+// Apply them to your routes
 app.use('/api/', globalLimiter);
 app.use('/auth/', authLimiter);
 // ============================================
