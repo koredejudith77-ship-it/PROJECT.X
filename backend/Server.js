@@ -500,7 +500,7 @@ app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
 app.post('/api/admin/disputes/:disputeId/resolve', requireAuth, requireAdmin, async (req, res) => {
   try {
     const { disputeId } = req.params;
-    const { action, notes } = req.body; // 'refund', 'release', or 'partial'
+    const { action, notes } = req.body;
 
     // 1. Get transaction details
     const { data: dispute, error: disputeError } = await supabase
@@ -527,14 +527,13 @@ app.post('/api/admin/disputes/:disputeId/resolve', requireAuth, requireAdmin, as
     } 
     else if (action === 'release') {
       await supabase.from('transactions').update({ escrow_status: 'released' }).eq('id', transaction.id);
-    }
+    } 
     else if (action === 'partial') {
       const refundAmount = transaction.amount * 0.5;
       await stripe.refunds.create({
         payment_intent: transaction.stripe_payment_intent_id,
         amount: Math.round(refundAmount * 100),
       });
-      // Note: Remaining amount stays with Stripe – manual payout needed for seller
     }
 
     // 3. Mark dispute resolved
@@ -556,20 +555,7 @@ app.post('/api/admin/disputes/:disputeId/resolve', requireAuth, requireAdmin, as
     console.error('Resolve dispute error:', error);
     res.status(500).json({ error: error.message });
   }
-  else if (action === 'partial') {
-  const refundAmount = transaction.amount * 0.5;
-  await stripe.refunds.create({
-    payment_intent: transaction.stripe_payment_intent_id,
-    amount: Math.round(refundAmount * 100),
-  });
-  // Notify admin to manually pay seller the remaining 50%
-  await supabase.from('notifications').insert({
-    user_id: req.user.id, // admin
-    type: 'admin_task',
-    title: 'Manual Payout Needed',
-    data: { transaction_id: transaction.id, amount: transaction.amount * 0.5 },
-  });
-  } 
+});
 
 // ============================================
 // CRON ROUTES
