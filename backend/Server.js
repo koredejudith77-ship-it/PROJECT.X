@@ -16,6 +16,7 @@ import rateLimit from 'express-rate-limit';
 import expressRateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import redis from './lib/redis.js';
+import { requireAdmin } from './middleware/adminAuth.js';
 import { body, validationResult } from 'express-validator';
 import csrf from 'csurf';
 
