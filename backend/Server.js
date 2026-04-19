@@ -495,6 +495,80 @@ app.post('/api/admin/users/:userId/unban', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// Resolve dispute with payment action
+app.post('/api/admin/disputes/:disputeId/resolve', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { disputeId } = req.params;
+    const { action, notes } = req.body; // 'refund', 'release', or 'partial'
+
+    // 1. Get transaction details
+    const { data: dispute, error: disputeError } = await supabase
+      .from('disputes')
+      .select('transaction_id')
+      .eq('id', disputeId)
+      .single();
+    if (disputeError) throw disputeError;
+
+    const { data: transaction, error: txError } = await supabase
+      .from('transactions')
+      .select('id, amount, stripe_payment_intent_id, buyer_id, seller_id')
+      .eq('id', dispute.transaction_id)
+      .single();
+    if (txError) throw txError;
+
+    // 2. Take payment action
+    if (action === 'refund') {
+      await stripe.refunds.create({
+        payment_intent: transaction.stripe_payment_intent_id,
+        amount: Math.round(transaction.amount * 100),
+      });
+      await supabase.from('transactions').update({ escrow_status: 'refunded' }).eq('id', transaction.id);
+    } 
+    else if (action === 'release') {
+      await supabase.from('transactions').update({ escrow_status: 'released' }).eq('id', transaction.id);
+    }
+    else if (action === 'partial') {
+      const refundAmount = transaction.amount * 0.5;
+      await stripe.refunds.create({
+        payment_intent: transaction.stripe_payment_intent_id,
+        amount: Math.round(refundAmount * 100),
+      });
+      // Note: Remaining amount stays with Stripe – manual payout needed for seller
+    }
+
+    // 3. Mark dispute resolved
+    await supabase.from('disputes').update({
+      status: 'resolved',
+      admin_notes: notes,
+      resolved_by: req.user.id,
+      resolved_at: new Date().toISOString(),
+    }).eq('id', disputeId);
+
+    // 4. Notify both parties
+    await supabase.from('notifications').insert([
+      { user_id: transaction.buyer_id, type: 'dispute_resolved', title: 'Dispute Resolved', data: { resolution: action } },
+      { user_id: transaction.seller_id, type: 'dispute_resolved', title: 'Dispute Resolved', data: { resolution: action } },
+    ]);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Resolve dispute error:', error);
+    res.status(500).json({ error: error.message });
+  }
+  else if (action === 'partial') {
+  const refundAmount = transaction.amount * 0.5;
+  await stripe.refunds.create({
+    payment_intent: transaction.stripe_payment_intent_id,
+    amount: Math.round(refundAmount * 100),
+  });
+  // Notify admin to manually pay seller the remaining 50%
+  await supabase.from('notifications').insert({
+    user_id: req.user.id, // admin
+    type: 'admin_task',
+    title: 'Manual Payout Needed',
+    data: { transaction_id: transaction.id, amount: transaction.amount * 0.5 },
+  });
+  } 
 
 // ============================================
 // CRON ROUTES
