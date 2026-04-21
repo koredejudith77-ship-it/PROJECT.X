@@ -556,6 +556,186 @@ app.post('/api/admin/disputes/:disputeId/resolve', requireAuth, requireAdmin, as
     res.status(500).json({ error: error.message });
   }
 });
+// ============================================
+// API KEY MANAGEMENT
+// ============================================
+
+// Generate API key
+app.post('/api/keys', requireAuth, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name) return res.status(400).json({ error: 'Name required' });
+
+    // Generate unique API key
+    const rawKey = crypto.randomBytes(32).toString('hex');
+    const hashedKey = crypto.createHash('sha256').update(rawKey).digest('hex');
+
+    const { data, error } = await supabase
+      .from('user_api_keys')
+      .insert({
+        user_id: req.user.id,
+        name,
+        key_hash: hashedKey,
+        expires_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Return raw key only once
+    res.json({ id: data.id, name: data.name, api_key: rawKey, expires_at: data.expires_at });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get user's API keys
+app.get('/api/keys', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('user_api_keys')
+      .select('id, name, created_at, last_used_at, expires_at')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Revoke API key
+app.delete('/api/keys/:id', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('user_api_keys')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+// ============================================
+// TEAM MANAGEMENT
+// ============================================
+
+// Get team members
+app.get('/api/team', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('team_members')
+      .select(`
+        id,
+        role,
+        invited_at,
+        accepted_at,
+        member:users!member_id (id, username, email, avatar_url)
+      `)
+      .eq('owner_id', req.user.id)
+      .order('joined_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Invite team member
+app.post('/api/team/invite', requireAuth, async (req, res) => {
+  try {
+    const { email, role = 'member' } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .single();
+
+    if (!existingUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if already a member
+    const { data: existing } = await supabase
+      .from('team_members')
+      .select('id')
+      .eq('owner_id', req.user.id)
+      .eq('member_id', existingUser.id)
+      .single();
+
+    if (existing) {
+      return res.status(400).json({ error: 'User already in team' });
+    }
+
+    // Add to team
+    const { data, error } = await supabase
+      .from('team_members')
+      .insert({
+        owner_id: req.user.id,
+        member_id: existingUser.id,
+        role,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Send notification
+    await supabase.from('notifications').insert({
+      user_id: existingUser.id,
+      type: 'team_invite',
+      title: 'Team Invite',
+      body: `${req.user.email} invited you to join their team`,
+      data: { team_id: data.id, owner_id: req.user.id },
+    });
+
+    res.json({ success: true, member: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Remove team member
+app.delete('/api/team/:memberId', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('team_members')
+      .delete()
+      .eq('owner_id', req.user.id)
+      .eq('member_id', req.params.memberId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update member role
+app.put('/api/team/:memberId', requireAuth, async (req, res) => {
+  try {
+    const { role } = req.body;
+    const { error } = await supabase
+      .from('team_members')
+      .update({ role })
+      .eq('owner_id', req.user.id)
+      .eq('member_id', req.params.memberId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============================================
 // CRON ROUTES
