@@ -622,7 +622,7 @@ app.delete('/api/keys/:id', requireAuth, async (req, res) => {
   }
 });
 // ============================================
-// TEAM MANAGEMENT
+// COMPLETE TEAM MANAGEMENT
 // ============================================
 
 // Get team members
@@ -631,10 +631,7 @@ app.get('/api/team', requireAuth, async (req, res) => {
     const { data, error } = await supabase
       .from('team_members')
       .select(`
-        id,
-        role,
-        invited_at,
-        accepted_at,
+        id, role, invited_at, accepted_at,
         member:users!member_id (id, username, email, avatar_url)
       `)
       .eq('owner_id', req.user.id)
@@ -647,7 +644,7 @@ app.get('/api/team', requireAuth, async (req, res) => {
   }
 });
 
-// Invite team member
+// Invite team member (with email notification)
 app.post('/api/team/invite', requireAuth, async (req, res) => {
   try {
     const { email, role = 'member' } = req.body;
@@ -656,7 +653,7 @@ app.post('/api/team/invite', requireAuth, async (req, res) => {
     // Check if user exists
     const { data: existingUser } = await supabase
       .from('users')
-      .select('id')
+      .select('id, email, username')
       .eq('email', email)
       .single();
 
@@ -689,32 +686,37 @@ app.post('/api/team/invite', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    // Send notification
+    // Send real notification (not just placeholder)
     await supabase.from('notifications').insert({
       user_id: existingUser.id,
       type: 'team_invite',
       title: 'Team Invite',
-      body: `${req.user.email} invited you to join their team`,
-      data: { team_id: data.id, owner_id: req.user.id },
+      body: `${req.user.email} invited you to join their team on BUILD.X`,
+      data: { 
+        team_id: data.id, 
+        owner_id: req.user.id,
+        role: role,
+        owner_name: req.user.email,
+      },
     });
 
+    // Also send email via Resend (optional but professional)
+    if (process.env.RESEND_API_KEY) {
+      try {
+        await sendEmail({
+          to: existingUser.email,
+          subject: `You've been invited to join a team on BUILD.X`,
+          html: `<h1>Team Invite</h1>
+                 <p>${req.user.email} has invited you to join their team as a ${role}.</p>
+                 <p>Login to BUILD.X to accept or decline.</p>
+                 <a href="${process.env.FRONTEND_URL}/settings">View Invite →</a>`,
+        });
+      } catch (emailErr) {
+        console.error('Email send failed:', emailErr);
+      }
+    }
+
     res.json({ success: true, member: data });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Remove team member
-app.delete('/api/team/:memberId', requireAuth, async (req, res) => {
-  try {
-    const { error } = await supabase
-      .from('team_members')
-      .delete()
-      .eq('owner_id', req.user.id)
-      .eq('member_id', req.params.memberId);
-
-    if (error) throw error;
-    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -723,12 +725,68 @@ app.delete('/api/team/:memberId', requireAuth, async (req, res) => {
 // Update member role
 app.put('/api/team/:memberId', requireAuth, async (req, res) => {
   try {
+    const { memberId } = req.params;
     const { role } = req.body;
+    
     const { error } = await supabase
       .from('team_members')
       .update({ role })
       .eq('owner_id', req.user.id)
-      .eq('member_id', req.params.memberId);
+      .eq('member_id', memberId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Remove team member
+app.delete('/api/team/:memberId', requireAuth, async (req, res) => {
+  try {
+    const { memberId } = req.params;
+    
+    const { error } = await supabase
+      .from('team_members')
+      .delete()
+      .eq('owner_id', req.user.id)
+      .eq('member_id', memberId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Accept team invite
+app.post('/api/team/accept/:teamId', requireAuth, async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    
+    const { error } = await supabase
+      .from('team_members')
+      .update({ accepted_at: new Date().toISOString() })
+      .eq('id', teamId)
+      .eq('member_id', req.user.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Decline team invite
+app.delete('/api/team/decline/:teamId', requireAuth, async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    
+    const { error } = await supabase
+      .from('team_members')
+      .delete()
+      .eq('id', teamId)
+      .eq('member_id', req.user.id);
 
     if (error) throw error;
     res.json({ success: true });
