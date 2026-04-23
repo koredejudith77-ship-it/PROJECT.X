@@ -1,9 +1,8 @@
 // services/previewService.js
 import sharp from 'sharp';
 import { supabase } from '../lib/supabase.js';
-import { uploadFile } from './fileUtils.js';
+import { uploadFile, getSignedUrl } from './fileUtils.js';
 
-// Use uploadFile instead of direct supabase.storage.upload
 export const PreviewService = {
   // Generate image previews (multiple sizes)
   async generateImagePreviews(imageBuffer, assetId) {
@@ -24,10 +23,17 @@ export const PreviewService = {
           .toBuffer();
 
         const filePath = `previews/${assetId}/${size.name}.jpg`;
-        const uploadResult = await storageService.uploadFile(resizedBuffer, filePath, 'previews');
+        
+        // Use fileUtils.uploadFile instead of direct upload
+        const uploadResult = await uploadFile(
+          resizedBuffer,
+          filePath,
+          'previews',
+          'image/jpeg'
+        );
 
         if (uploadResult.success) {
-          previews[size.name] = storageService.getPublicUrl(filePath, 'previews');
+          previews[size.name] = uploadResult.publicUrl;
         }
       }
 
@@ -51,12 +57,13 @@ export const PreviewService = {
   async generateVideoThumbnail(videoBuffer, assetId) {
     try {
       // Note: This requires ffmpeg on the server
-      // For Render, you may need to install ffmpeg or use a service like Mux
-      
-      // Placeholder implementation – in production, use ffmpeg or external service
+      // For MVP, return placeholder
       console.log('Video thumbnail generation requires ffmpeg');
       
-      return { success: false, error: 'Video thumbnail generation not configured' };
+      // Placeholder thumbnail
+      const placeholderPath = `previews/${assetId}/video-placeholder.jpg`;
+      
+      return { success: false, error: 'Video thumbnail generation not configured', placeholder: true };
     } catch (error) {
       console.error('Generate video thumbnail error:', error);
       return { success: false, error: error.message };
@@ -87,7 +94,6 @@ export const PreviewService = {
     try {
       // This would require pdf2img or similar library
       console.log('PDF preview generation requires additional libraries');
-      
       return { success: false, error: 'PDF preview not configured' };
     } catch (error) {
       console.error('Generate PDF preview error:', error);
@@ -109,4 +115,25 @@ export const PreviewService = {
     
     return { success: true, previews: {} };
   },
+  
+  // Get preview URL
+  async getPreviewUrl(assetId, size = 'medium') {
+    try {
+      const { data: asset, error } = await supabase
+        .from('forge_assets')
+        .select('preview_url, thumbnail_url')
+        .eq('id', assetId)
+        .single();
+      
+      if (error) throw error;
+      
+      const url = size === 'thumbnail' ? asset.thumbnail_url : asset.preview_url;
+      return { success: true, url };
+    } catch (error) {
+      console.error('Get preview URL error:', error);
+      return { success: false, error: error.message };
+    }
+  },
 };
+
+export default PreviewService; 
