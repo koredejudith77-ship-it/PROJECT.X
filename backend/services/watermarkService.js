@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import { supabase } from '../lib/supabase.js';
-import { uploadToSupabase, deleteFromStorage, getSignedUrl } from './storageService.js';
+import { uploadFile, deleteFile, getSignedUrl, fileExists } from './services/fileUtils.js';
 
 export const WatermarkService = {
   // Add text watermark to image
