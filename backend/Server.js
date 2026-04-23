@@ -21,6 +21,9 @@ import { validateFile, getAllowedFileTypes } from './services/validationService.
 import { generateHash, verifyHash } from './services/hashService.js';
 import { uploadToSupabase, deleteFromStorage, getSignedUrl } from './services/storageService.js';
 import { releaseEscrow, refundEscrow } from './services/escrowService.js';
+import { generatePreview, generateVideoThumbnail, generateAudioWaveform } from './services/previewService.js';
+import { scanFile, scanFileHash } from './services/virusScanService.js';
+import { addWatermark, watermarkAndUpload } from './services/watermarkService.js';
 import { body, validationResult } from 'express-validator';
 import csrf from 'csurf';
 
@@ -245,6 +248,48 @@ async function requireAuth(req, res, next) {
   req.user = user;
   next();
 }
+// ============================================
+// FILE VALIDATION ENDPOINT
+// ============================================
+import multer from 'multer';
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post('/upload/validate', requireAuth, upload.single('file'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+    
+    // Validate file
+    const validation = await validateFile(file);
+    
+    // Generate hash
+    const fileHash = generateHash(file.buffer);
+    
+    // Optional: Virus scan (if API key exists)
+    let virusScan = null;
+    if (process.env.VIRUS_TOTAL_API_KEY) {
+      virusScan = await scanFile(file);
+    }
+    
+    res.json({
+      valid: validation.valid,
+      errors: validation.errors,
+      fileHash,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+      virusScan: virusScan ? {
+        isMalicious: virusScan.isMalicious,
+        stats: virusScan.stats,
+      } : null,
+      allowedTypes: getAllowedFileTypes(),
+    });
+  } catch (err) {
+    console.error('Validation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================
 // API KEY AUTH MIDDLEWARE
