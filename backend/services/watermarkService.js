@@ -1,6 +1,6 @@
-// services/watermarkService.js
 import sharp from 'sharp';
-import { storageService } from './storageService.js';
+import { supabase } from '../lib/supabase.js';
+import { uploadToSupabase, deleteFromStorage, getSignedUrl } from './storageService.js';
 
 export const WatermarkService = {
   // Add text watermark to image
@@ -120,10 +120,11 @@ export const WatermarkService = {
       // Generate watermarked file path
       const watermarkedPath = originalPath.replace(/\.([^/.]+)$/, '_watermarked.$1');
       
-      // Upload watermarked version
-      const uploadResult = await storageService.uploadFile(
-        result.watermarkedBuffer,
-        watermarkedPath,
+      // Upload watermarked version using uploadToSupabase
+      const timestamp = Date.now();
+      const uploadResult = await uploadToSupabase(
+        { buffer: result.watermarkedBuffer, originalname: watermarkedPath, mimetype: 'image/jpeg' },
+        assetId,
         'forge-assets'
       );
 
@@ -136,18 +137,18 @@ export const WatermarkService = {
         .from('forge_assets')
         .update({ 
           is_watermarked: true,
-          watermarked_path: watermarkedPath,
+          watermarked_path: uploadResult.filePath,
         })
         .eq('id', assetId);
 
-      return { success: true, watermarkedPath };
+      return { success: true, watermarkedPath: uploadResult.filePath };
     } catch (error) {
       console.error('Watermark and save error:', error);
       return { success: false, error: error.message };
     }
   },
 
-  // Remove watermark (for original asset download after purchase)
+  // Get original URL (non-watermarked)
   async getOriginalUrl(assetId) {
     try {
       const { data: asset, error } = await supabase
@@ -159,7 +160,7 @@ export const WatermarkService = {
       if (error) throw error;
 
       // Generate signed URL for original (non-watermarked) asset
-      const signedUrl = await storageService.getSignedUrl(asset.storage_path, 'forge-assets', 3600);
+      const signedUrl = await getSignedUrl(asset.storage_path, 'forge-assets', 3600);
       
       return signedUrl;
     } catch (error) {
@@ -168,3 +169,5 @@ export const WatermarkService = {
     }
   },
 };
+
+export default WatermarkService; 
