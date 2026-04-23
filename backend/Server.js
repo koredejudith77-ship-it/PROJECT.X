@@ -17,13 +17,16 @@ import expressRateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import redis from './lib/redis.js';
 import { requireAdmin } from './middleware/adminAuth.js';
+// ============================================
+// SERVICE IMPORTS
+// ============================================
 import { validateFile, getAllowedFileTypes } from './services/validationService.js';
-import { generateHash, verifyHash } from './services/hashService.js';
-import { uploadToSupabase, deleteFromStorage, getSignedUrl } from './services/storageService.js';
+import { generateHash, verifyHash, getShortHash } from './services/hashService.js';
+import { uploadFile, deleteFile, getSignedUrl, fileExists } from './services/fileUtils.js';
 import { releaseEscrow, refundEscrow } from './services/escrowService.js';
-import { generatePreview, generateVideoThumbnail, generateAudioWaveform } from './services/previewService.js';
+import { PreviewService } from './services/previewService.js';
 import { scanFile, scanFileHash } from './services/virusScanService.js';
-import { addWatermark, watermarkAndUpload } from './services/watermarkService.js';
+import { WatermarkService } from './services/watermarkService.js';
 import { body, validationResult } from 'express-validator';
 import csrf from 'csurf';
 
@@ -287,6 +290,69 @@ app.post('/upload/validate', requireAuth, upload.single('file'), async (req, res
     });
   } catch (err) {
     console.error('Validation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// ============================================
+// FILE OPERATIONS ENDPOINTS (using fileUtils)
+// ============================================
+
+// Get signed URL for a file
+app.post('/file/signed-url', requireAuth, async (req, res) => {
+  try {
+    const { filePath, bucket = 'assets', expiresIn = 3600 } = req.body;
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'filePath required' });
+    }
+    
+    const result = await getSignedUrl(filePath, bucket, expiresIn);
+    
+    if (!result.success) throw new Error(result.error);
+    
+    res.json({ signedUrl: result.signedUrl });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Check if file exists
+app.post('/file/exists', requireAuth, async (req, res) => {
+  try {
+    const { filePath, bucket = 'assets' } = req.body;
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'filePath required' });
+    }
+    
+    const exists = await fileExists(filePath, bucket);
+    
+    res.json({ exists });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete file
+app.delete('/file/delete', requireAuth, async (req, res) => {
+  try {
+    const { filePath, bucket = 'assets' } = req.body;
+    
+    if (!filePath) {
+      return res.status(400).json({ error: 'filePath required' });
+    }
+    
+    // Only allow deleting own files (check path contains user ID)
+    if (!filePath.includes(req.user.id) && !req.user.is_admin) {
+      return res.status(403).json({ error: 'Not authorized to delete this file' });
+    }
+    
+    const result = await deleteFile(filePath, bucket);
+    
+    if (!result.success) throw new Error(result.error);
+    
+    res.json({ success: true });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
