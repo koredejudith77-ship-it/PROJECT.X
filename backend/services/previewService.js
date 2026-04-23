@@ -1,8 +1,9 @@
 // services/previewService.js
 import sharp from 'sharp';
-import { storageService } from './storageService.js';
 import { supabase } from '../lib/supabase.js';
+import { uploadFile } from './fileUtils.js';
 
+// Use uploadFile instead of direct supabase.storage.upload
 export const PreviewService = {
   // Generate image previews (multiple sizes)
   async generateImagePreviews(imageBuffer, assetId) {
