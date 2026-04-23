@@ -1,6 +1,5 @@
 // services/storageService.js
-import { uploadFile, deleteFile, getSignedUrl, fileExists } from './fileUtils.js';
-
+export { uploadFile, deleteFile, getSignedUrl, fileExists } from './fileUtils.js';
 // Generate unique file path
 export function generateFilePath(userId, filename, folder = 'assets') {
   const timestamp = Date.now();
