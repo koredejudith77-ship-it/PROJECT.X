@@ -17,6 +17,27 @@ const MAGIC_NUMBERS = {
   '664c6143': 'audio/flac',
 };
 
+// Define limits for file size checking
+const FILE_LIMITS = {
+  image: 50 * 1024 * 1024,
+  video: 500 * 1024 * 1024,
+  audio: 100 * 1024 * 1024,
+  document: 50 * 1024 * 1024,
+  model: 200 * 1024 * 1024,
+  software: 500 * 1024 * 1024,
+  default: 10 * 1024 * 1024,
+};
+
+const ALLOWED_EXTENSIONS = [
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic',
+  '.mp4', '.mov', '.webm', '.avi',
+  '.mp3', '.wav', '.flac', '.aac', '.ogg',
+  '.pdf', '.doc', '.docx',
+  '.gltf', '.glb', '.obj', '.fbx', '.stl',
+  '.zip', '.rar',
+  '.js', '.py', '.html', '.css', '.json', '.sol',
+];
+
 export const ValidationService = {
   // Validate file type by magic number (not just extension)
   detectRealFileType(buffer) {
@@ -34,17 +55,14 @@ export const ValidationService = {
   async validateFileIntegrity(file, detectedType) {
     try {
       if (detectedType.startsWith('image/')) {
-        // Try to decode image
         const sharp = await import('sharp');
         await sharp(file.buffer).metadata();
       } else if (detectedType === 'application/pdf') {
-        // Try to parse PDF
         const pdf = await import('pdf-parse');
         await pdf(file.buffer);
       } else if (detectedType.startsWith('video/')) {
-        // Check video headers (simplified)
         const buffer = file.buffer;
-        const hasMoov = buffer.toString('hex', 4, 8).includes('6d6f6f76'); // 'moov'
+        const hasMoov = buffer.toString('hex', 4, 8).includes('6d6f6f76');
         if (!hasMoov) {
           return { valid: false, error: 'Video file appears corrupted (missing moov atom)' };
         }
@@ -74,17 +92,7 @@ export const ValidationService = {
 
   // Validate file size against category
   validateFileSize(fileSize, category) {
-    const limits = {
-      image: 50 * 1024 * 1024,
-      video: 500 * 1024 * 1024,
-      audio: 100 * 1024 * 1024,
-      document: 50 * 1024 * 1024,
-      model: 200 * 1024 * 1024,
-      software: 500 * 1024 * 1024,
-      default: 10 * 1024 * 1024,
-    };
-
-    const limit = limits[category] || limits.default;
+    const limit = FILE_LIMITS[category] || FILE_LIMITS.default;
     const isValid = fileSize <= limit;
     
     return {
@@ -96,7 +104,6 @@ export const ValidationService = {
 
   // Validate filename (prevent path traversal)
   validateFilename(filename) {
-    // Check for path traversal attempts
     const dangerous = ['..', '/', '\\', '%00', '%2e', '%2f'];
     for (const char of dangerous) {
       if (filename.includes(char)) {
@@ -104,19 +111,8 @@ export const ValidationService = {
       }
     }
     
-    // Check extension
-    const allowedExtensions = [
-      '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic',
-      '.mp4', '.mov', '.webm', '.avi',
-      '.mp3', '.wav', '.flac', '.aac', '.ogg',
-      '.pdf', '.doc', '.docx',
-      '.gltf', '.glb', '.obj', '.fbx', '.stl',
-      '.zip', '.rar',
-      '.js', '.py', '.html', '.css', '.json', '.sol',
-    ];
-    
     const ext = filename.substring(filename.lastIndexOf('.')).toLowerCase();
-    if (!allowedExtensions.includes(ext)) {
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
       return { valid: false, error: `File extension ${ext} is not allowed` };
     }
     
@@ -127,19 +123,16 @@ export const ValidationService = {
   async validateFile(file, category) {
     const errors = [];
     
-    // Check filename
     const filenameCheck = this.validateFilename(file.originalname);
     if (!filenameCheck.valid) {
       errors.push(filenameCheck.error);
     }
     
-    // Check file size
     const sizeCheck = this.validateFileSize(file.size, category);
     if (!sizeCheck.valid) {
       errors.push(`File too large. Max ${sizeCheck.maxSizeMB}MB, got ${sizeCheck.actualSizeMB}MB`);
     }
     
-    // Detect real file type
     const detectedType = this.detectRealFileType(file.buffer);
     const claimedType = file.mimetype;
     
@@ -147,13 +140,11 @@ export const ValidationService = {
       errors.push(`File type mismatch. Claimed: ${claimedType}, Detected: ${detectedType}`);
     }
     
-    // Check integrity
     const integrityCheck = await this.validateFileIntegrity(file, detectedType);
     if (!integrityCheck.valid) {
       errors.push(integrityCheck.error);
     }
     
-    // Generate hash and check if blocked
     const fileHash = generateHash(file.buffer);
     const blockedCheck = await this.isHashBlocked(fileHash);
     if (blockedCheck.isBlocked) {
@@ -206,3 +197,16 @@ export const ValidationService = {
     return { valid: true };
   },
 };
+
+// ✅ ADD THIS EXPORT (for server.js)
+export function getAllowedFileTypes() {
+  return {
+    maxSizeMB: FILE_LIMITS.default / 1024 / 1024,
+    allowedTypes: Object.values(MAGIC_NUMBERS),
+    allowedExtensions: ALLOWED_EXTENSIONS,
+    limits: FILE_LIMITS,
+  };
+}
+
+// Also export ValidationService as default
+export default ValidationService; 
