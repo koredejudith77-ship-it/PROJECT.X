@@ -25,7 +25,7 @@ import { generateHash, verifyHash, getShortHash } from './services/hashService.j
 import { uploadFile, deleteFile, getSignedUrl, fileExists } from './services/fileUtils.js';
 import { releaseEscrow, refundEscrow } from './services/escrowService.js';
 import { PreviewService } from './services/previewService.js';
-import { scanFile, scanFileHash } from './services/virusScanService.js';
+import { scanFile, scanHash } from './services/virusScanService.js';
 import { WatermarkService } from './services/watermarkService.js';
 import { body, validationResult } from 'express-validator';
 import csrf from 'csurf';
