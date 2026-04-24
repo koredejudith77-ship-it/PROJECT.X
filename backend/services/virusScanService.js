@@ -147,7 +147,9 @@ export const VirusScanService = {
       return { success: true, blockedFiles: data };
     } catch (error) {
       console.error('Get blocked files error:', error);
-      return { success: false, error: error.message };
- }
+      return { success: false, error: error.message }
+    }
   }
-}; 
+};
+
+export { scanFile, scanFileHash };
