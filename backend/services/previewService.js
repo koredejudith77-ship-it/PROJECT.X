@@ -133,7 +133,19 @@ export const PreviewService = {
       console.error('Get preview URL error:', error);
       return { success: false, error: error.message };
     }
-  },
+  }
+  // services/previewService.js
+// Add this at the end of the file
+
+export const PreviewService = {
+  generateImagePreviews,
+  generateVideoThumbnail,
+  generateAudioWaveform,
+  generatePdfPreview,
+  generatePreview,
+  getPreviewUrl,
 };
 
-export default PreviewService; 
+// Also export individual functions
+export const generatePreview = PreviewService.generatePreview;
+export const getPreviewUrl = PreviewService.getPreviewUrl;
