@@ -134,13 +134,4 @@ export const PreviewService = {
       return { success: false, error: error.message };
     }
   }
-  // services/previewService.js
-// Add this at the end of the file
-export const PreviewService = {
-  generateImagePreviews,
-  generateVideoThumbnail,
-  generateAudioWaveform,
-  generatePdfPreview,
-  generatePreview,
-  getPreviewUrl,
 };
