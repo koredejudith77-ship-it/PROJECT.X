@@ -140,11 +140,4 @@ export async function autoReleaseExpiredEscrow(days = 7) {
     return { success: false, error: error.message };
   }
 }
-
-// Export as object for convenience
-export const EscrowService = {
-  releaseEscrow,
-  refundEscrow,
-  getEscrowByTransaction,
-  autoReleaseExpiredEscrow,
 };
