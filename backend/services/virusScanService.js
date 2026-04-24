@@ -148,6 +148,6 @@ export const VirusScanService = {
     } catch (error) {
       console.error('Get blocked files error:', error);
       return { success: false, error: error.message };
-    }
-  } 
-};
+ }
+  }
+}; 
