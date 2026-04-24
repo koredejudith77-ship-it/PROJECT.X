@@ -22,7 +22,7 @@ import { requireAdmin } from './middleware/adminAuth.js';
 // ============================================
 import { ValidationService, getAllowedFileTypes } from './services/validationService.js';
 const { validateFile } = ValidationService;
-import { generateHash, verifyHash, getShortHash } from './services/hashService.js';
+import { generateHash, compareHashes, getShortHash } from './services/hashService.js';
 import { uploadFile, deleteFile, getSignedUrl, fileExists } from './services/fileUtils.js';
 import { releaseEscrow, refundEscrow } from './services/escrowService.js';
 import { PreviewService } from './services/previewService.js';
