@@ -152,4 +152,4 @@ export const VirusScanService = {
   }
 };
 
-export { scanFile, scanFileHash };
+export const { scanFile, scanHash } = VirusScanService;
