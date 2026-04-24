@@ -136,8 +136,7 @@ export async function autoReleaseExpiredEscrow(days = 7) {
     }
 
     return { success: true, released: results.length, results };
-  } catch (error) {
+    } catch (error) {
     return { success: false, error: error.message };
-     }
   }
-}; 
+}
