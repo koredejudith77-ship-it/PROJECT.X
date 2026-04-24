@@ -136,7 +136,6 @@ export const PreviewService = {
   }
   // services/previewService.js
 // Add this at the end of the file
-
 export const PreviewService = {
   generateImagePreviews,
   generateVideoThumbnail,
@@ -145,7 +144,3 @@ export const PreviewService = {
   generatePreview,
   getPreviewUrl,
 };
-
-// Also export individual functions
-export const generatePreview = PreviewService.generatePreview;
-export const getPreviewUrl = PreviewService.getPreviewUrl;
