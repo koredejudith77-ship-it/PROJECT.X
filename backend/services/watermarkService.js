@@ -122,11 +122,12 @@ export const WatermarkService = {
       
       // Upload watermarked version using uploadToSupabase
       const timestamp = Date.now();
-      const uploadResult = await uploadToSupabase(
-        { buffer: result.watermarkedBuffer, originalname: watermarkedPath, mimetype: 'image/jpeg' },
-        assetId,
-        'forge-assets'
-      );
+      const uploadResult = await uploadFile(
+      result.watermarkedBuffer,
+      watermarkedPath,
+     'forge-assets',
+    'image/jpeg'
+    );
 
       if (!uploadResult.success) {
         return uploadResult;
