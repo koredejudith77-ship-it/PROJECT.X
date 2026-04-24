@@ -205,10 +205,8 @@ export function getAllowedFileTypes() {
     allowedTypes: Object.values(MAGIC_NUMBERS),
     allowedExtensions: ALLOWED_EXTENSIONS,
     limits: FILE_LIMITS,
-  }
-  }
-};
-
+  };
+}
 
 // Also export ValidationService as default
 export default ValidationService; 
