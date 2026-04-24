@@ -1,4 +1,3 @@
-//previewService.js
 import sharp from 'sharp';
 import { supabase } from '../lib/supabase.js';
 import { uploadFile, getSignedUrl } from './fileUtils.js';
@@ -131,4 +130,7 @@ export const PreviewService = {
       return { success: true, url };
     } catch (error) {
       console.error('Get preview URL error:', error);
-      return { success: false, error: error.message }
+      return { success: false, error: error.message };
+    }
+  }
+};
