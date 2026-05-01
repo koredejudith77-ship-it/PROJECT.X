@@ -111,6 +111,7 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
       'https://www.buildx.com',
       'https://app.buildx.com',
       'https://api.buildx.com',
+      'https://buildx-evolution.vercel.app',
       /\.buildx\.com$/,
     ]
   : ['http://localhost:3000', 'http://localhost:8081', 'http://localhost:19006'];
@@ -910,6 +911,23 @@ app.delete('/api/team/decline/:teamId', requireAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// ============================================
+// LOGIN HISTORY
+// ============================================
+app.get('/api/login-history', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('login_history')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}); 
 
 // ============================================
 // CRON ROUTES
