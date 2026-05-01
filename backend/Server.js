@@ -928,6 +928,19 @@ app.get('/api/login-history', requireAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 }); 
+app.post('/syndicate/create', requireAuth, async (req, res) => {
+  try {
+    const { title, description, target_amount, min_contribution } = req.body;
+    const { data, error } = await supabase.from('syndicates').insert({
+      title, description, target_amount, min_contribution,
+      creator_id: req.user.id, status: 'open',
+    }).select().single();
+    if (error) throw error;
+    res.json({ success: true, syndicate: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ============================================
 // CRON ROUTES
